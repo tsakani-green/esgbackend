@@ -3,14 +3,15 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
 
-# install deps
-COPY app/requirements.txt /app/requirements.txt
+# Copy requirements from ROOT (not app/)
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# copy the *package* into /app/app
-COPY app /app/app
+# Copy the entire esgbackend folder (which contains app/, api/, etc.)
+COPY esgbackend /app/esgbackend
 
-# optional runtime dir
+# Create uploads directory
 RUN mkdir -p /app/uploads
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
+# Change the CMD to point to the correct location
+CMD ["sh", "-c", "cd /app/esgbackend && uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
