@@ -1,0 +1,32 @@
+services:
+  # ESG Backend API Service
+  - type: web
+    name: esgbackend
+    runtime: python
+    plan: free
+    rootDir: app
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DEBUG
+        value: false
+      - key: ENVIRONMENT
+        value: production
+      - key: FRONTEND_URL
+        value: https://esgfrontend-delta.vercel.app
+      - key: CORS_ORIGINS
+        value: https://esgfrontend-delta.vercel.app
+      # Add your other environment variables here
+      - key: MONGODB_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SUNSYNK_API_KEY
+        sync: false
+      - key: SUNSYNK_API_SECRET
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false

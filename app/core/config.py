@@ -37,13 +37,11 @@ class Settings(BaseSettings):
         default=(
             "http://localhost:5173,http://127.0.0.1:5173,"
             "http://localhost:3000,http://127.0.0.1:3000,"
-            "http://localhost:3002,http://127.0.0.1:3002,"
-            "http://localhost:3004,http://127.0.0.1:3004"
         )
     )
 
     # Frontend public URL (Render static site)
-    FRONTEND_URL: str = Field(default="http://localhost:5173")
+    FRONTEND_URL: str = Field(default="esgfrontend-delta.vercel.app")
 
     # -------------------------
     # Uploads

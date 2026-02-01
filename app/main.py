@@ -65,6 +65,8 @@ def _build_cors_origins() -> list[str]:
         "http://127.0.0.1:3004",
         "http://localhost:3008",
         "http://127.0.0.1:3008",
+        # Production Vercel frontend
+        "https://esgfrontend-delta.vercel.app",
     ]
 
     extra: list[str] = []
