@@ -5,7 +5,7 @@
 #  - application/x-www-form-urlencoded (OAuth2 style)
 #  - application/json: { "username": "...", "password": "..." }
 
-from fastapi import APIRouter, HTTPException, Request, Depends, status
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
@@ -167,8 +167,8 @@ async def signup(payload: SignupIn):
     token = make_activation_token(user_id=user_id, email=email)
     activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
 
-    # IMPORTANT: do NOT fall back to returning activation link.
-    # If email sending fails, raise an error so the client sees it.
+    # IMPORTANT: No fallback activation_link returned.
+    # If email sending fails, raise error so client sees it.
     try:
         send_activation_email(email, full_name, activation_link)
     except Exception as e:

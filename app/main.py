@@ -32,11 +32,10 @@ app = FastAPI(
 )
 
 # -------------------------------------------------------------------
-# Validation error handler (422) — VERY useful for login debugging
+# Validation error handler (422)
 # -------------------------------------------------------------------
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    # DO NOT log passwords — just metadata
     content_type = request.headers.get("content-type", "")
     logger.warning(
         f"422 ValidationError on {request.method} {request.url.path} "
@@ -53,7 +52,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 # -------------------------------------------------------------------
-# Global exception handler (helps debug 500s cleanly)
+# Global exception handler
 # -------------------------------------------------------------------
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
@@ -73,10 +72,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # -------------------------------------------------------------------
 def _build_cors_origins() -> list[str]:
     base = [
-        # Vite default dev
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        # Other dev ports
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
@@ -87,24 +84,22 @@ def _build_cors_origins() -> list[str]:
         "http://127.0.0.1:3004",
         "http://localhost:3008",
         "http://127.0.0.1:3008",
-        # Production Vercel frontend
         "https://esgfrontend-delta.vercel.app",
     ]
 
     extra: list[str] = []
     try:
-        extra = settings.get_cors_origins()  # already list[str]
+        extra = settings.get_cors_origins()
     except Exception as e:
         logger.warning(f"Failed to parse CORS_ORIGINS: {e}")
         extra = []
 
-    # Always include FRONTEND_URL if set
     if getattr(settings, "FRONTEND_URL", ""):
         extra.append(settings.FRONTEND_URL.strip())
 
     merged: list[str] = []
     for origin in base + extra:
-        origin = (origin or "").strip().rstrip("/")  # normalize trailing slash
+        origin = (origin or "").strip().rstrip("/")
         if origin and origin not in merged:
             merged.append(origin)
 
@@ -114,7 +109,6 @@ def _build_cors_origins() -> list[str]:
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
-# Allow localhost/127.0.0.1 on ANY port in dev
 cors_origin_regex = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 app.add_middleware(
@@ -197,14 +191,12 @@ async def on_startup():
 
     logger.info("Starting ESG Dashboard API...")
 
-    # Start eGauge scheduler (safe)
     try:
         scheduler = start_egauge_scheduler()
         logger.info("eGauge poller scheduler started")
     except Exception as e:
         logger.warning(f"eGauge scheduler not started: {e}")
 
-    # Log AI readiness
     try:
         from app.services.gemini_esg import get_gemini_esg_service
         gemini = get_gemini_esg_service()
