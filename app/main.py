@@ -20,9 +20,6 @@ from .api import email as email_router
 from .services.egauge_poller import start_egauge_scheduler
 from .services.egauge_client import diagnose_egauge_connection
 
-# ✅ Gemini service instance
-from app.services.gemini_esg import gemini_esg_service
-
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -36,6 +33,7 @@ app = FastAPI(
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None,
 )
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -54,6 +52,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         },
     )
 
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception(f"Unhandled exception on {request.method} {request.url}")
@@ -67,8 +66,13 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         },
     )
 
+
+# -------------------------------------------------------------------
+# CORS middleware (REAL origins only — no regex)
+# -------------------------------------------------------------------
 def _build_cors_origins() -> list[str]:
     origins = [
+        # Local dev
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
@@ -81,6 +85,8 @@ def _build_cors_origins() -> list[str]:
         "http://127.0.0.1:3004",
         "http://localhost:3008",
         "http://127.0.0.1:3008",
+
+        # Production frontend
         "https://esgfrontend-delta.vercel.app",
     ]
 
@@ -104,6 +110,7 @@ def _build_cors_origins() -> list[str]:
 
     return merged
 
+
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
@@ -115,7 +122,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# -------------------------------------------------------------------
 # Routers
+# -------------------------------------------------------------------
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(sunsynk.router, prefix="/api/sunsynk", tags=["sunsynk"])
@@ -126,12 +136,15 @@ app.include_router(projects_router, prefix="/api/assets", tags=["assets"])
 app.include_router(meters_router, prefix="/api/meters", tags=["meters"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
-app.include_router(gemini_ai.router, tags=["Gemini AI"])
+app.include_router(gemini_ai.router, tags=["Gemini AI"])  # /api/gemini/**
 app.include_router(ai_agent.router, prefix="/api/ai", tags=["AI Agent"])
 app.include_router(recent_activities_router, tags=["recent-activities"])
+
+# ✅ Email routes
 app.include_router(email_router.router, prefix="/api/email", tags=["email"])
 
 scheduler = None
+
 
 def _dump_routes():
     if not settings.DEBUG:
@@ -146,6 +159,7 @@ def _dump_routes():
         path = getattr(route, "path", "")
         methods = ",".join(sorted(getattr(route, "methods", []) or []))
         name = getattr(route, "name", "")
+
         prefix = "/".join(path.split("/")[:3]) if len(path.split("/")) > 2 else "Other"
         routes_by_prefix.setdefault(prefix, []).append(f"{methods:15} {path:45} -> {name}")
 
@@ -158,6 +172,7 @@ def _dump_routes():
     print("END ROUTES")
     print("=" * 60 + "\n")
 
+
 async def _run_startup_diagnostics():
     try:
         if not settings.EGAUGE_BASE_URL:
@@ -169,10 +184,12 @@ async def _run_startup_diagnostics():
         errors = [r for r in results if r.get("error")]
 
         logger.info(f"Diagnostic complete: {len(working)} working endpoints, {len(errors)} errors")
+
         if not working:
             logger.error("No working eGauge endpoints found! Check configuration.")
     except Exception as e:
         logger.error(f"Startup diagnostic failed: {e}")
+
 
 @app.on_event("startup")
 async def on_startup():
@@ -186,10 +203,13 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"eGauge scheduler not started: {e}")
 
-    # ✅ Gemini status log
+    # ✅ This import will now work because services/gemini_esg.py includes get_gemini_esg_service()
     try:
+        from app.services.gemini_esg import get_gemini_esg_service
+        gemini = get_gemini_esg_service()
         logger.info(
-            f"Gemini AI enabled: {not gemini_esg_service.mock_mode}; model={gemini_esg_service.model_name}"
+            f"Gemini AI enabled: {not getattr(gemini, 'mock_mode', True)}; "
+            f"model={getattr(gemini, 'model_name', None)}"
         )
     except Exception as e:
         logger.warning(f"Unable to determine Gemini AI status: {e}")
@@ -200,6 +220,7 @@ async def on_startup():
 
     logger.info(f"Application startup complete. Environment: {settings.ENVIRONMENT}")
 
+
 @app.on_event("shutdown")
 async def on_shutdown():
     global scheduler
@@ -207,6 +228,7 @@ async def on_shutdown():
         scheduler.shutdown(wait=False)
         logger.info("eGauge poller scheduler stopped")
     logger.info("Application shutdown complete")
+
 
 @app.get("/")
 async def root():
@@ -220,9 +242,10 @@ async def root():
             "assets": "/api/assets",
             "health": "/health",
             "email": "/api/email",
-            "gemini": "/api/gemini/status",
+            "gemini": "/api/gemini",
         },
     }
+
 
 @app.get("/health")
 async def health_check():
@@ -249,7 +272,6 @@ async def health_check():
             "database": db_status,
             "egauge": egauge_health,
             "scheduler": "running" if scheduler else "stopped",
-            "gemini": "enabled" if not gemini_esg_service.mock_mode else "mock",
         },
         "environment": settings.ENVIRONMENT,
     }

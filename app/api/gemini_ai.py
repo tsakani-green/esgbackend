@@ -1,17 +1,15 @@
 # backend/app/api/gemini_ai.py
-
-import io
-import logging
-from typing import Dict, List, Optional
+# Gemini AI API Endpoints for ESG Analysis (uses gemini_esg_service from services/gemini_esg.py)
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
+from typing import Dict, List, Optional
+import logging
 from pydantic import BaseModel
 
 from app.services.gemini_esg import gemini_esg_service
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/gemini", tags=["Gemini AI"])
 
 
@@ -42,160 +40,76 @@ class AIReportRequest(BaseModel):
     companyData: Optional[Dict] = None
 
 
-@router.post("/predict-esg-scores")
-async def gemini_predict_esg_scores(request: ESGPredictionRequest):
+class ChatRequest(BaseModel):
+    question: str
+    context: str = ""
+
+
+@router.post("/energy-trends")
+async def energy_trends(payload: Dict):
+    """
+    Expected payload:
+      { "energy_data": [ { "energy": 123, ... }, ... ], "live_data": {...optional...} }
+    """
     try:
-        logger.info(f"Gemini ESG prediction for client: {request.clientId}")
-
-        company_data = request.companyData or {
-            "industry": "Technology",
-            "size": "Medium",
-            "region": "North America",
-            "current_esg_score": 75,
-            "emissions": {"scope1": 500, "scope2": 300, "scope3": 200},
-            "energy_consumption": 10000,
-            "renewable_percentage": 25,
-        }
-
-        result = await gemini_esg_service.predict_esg_scores(company_data)
+        energy_data = payload.get("energy_data") or []
+        live_data = payload.get("live_data")
+        result = await gemini_esg_service.analyze_energy_trends(energy_data, live_data=live_data)
         return JSONResponse(content=result)
-
     except Exception as e:
-        logger.error(f"Gemini ESG prediction error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+        logger.exception(f"energy-trends error: {e}")
+        raise HTTPException(status_code=500, detail="Energy trend analysis failed")
 
 
-@router.post("/assess-risks")
-async def gemini_assess_risks(request: RiskAssessmentRequest):
+@router.post("/carbon-footprint")
+async def carbon_footprint(payload: Dict):
+    """
+    Expected payload:
+      { "energy_data": [ ... ], "carbon_factor": 0.95(optional) }
+    """
     try:
-        logger.info(f"Gemini risk assessment for portfolio: {request.portfolioId}")
-
-        portfolio_data = request.portfolioData or {
-            "assets": [
-                {"name": "Office Building", "type": "Real Estate", "emissions": 150},
-                {"name": "Manufacturing Plant", "type": "Industrial", "emissions": 800},
-            ],
-            "total_emissions": 950,
-            "industry": "Mixed",
-        }
-
-        result = await gemini_esg_service.assess_esg_risks(portfolio_data)
+        energy_data = payload.get("energy_data") or []
+        carbon_factor = float(payload.get("carbon_factor", 0.95))
+        result = await gemini_esg_service.analyze_carbon_footprint(energy_data, carbon_factor=carbon_factor)
         return JSONResponse(content=result)
-
     except Exception as e:
-        logger.error(f"Gemini risk assessment error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Risk assessment failed: {str(e)}")
-
-
-@router.post("/forecast-carbon")
-async def gemini_forecast_carbon(request: CarbonForecastRequest):
-    try:
-        logger.info(f"Gemini carbon forecast for client: {request.clientId}")
-
-        historical_data = request.historicalData or {
-            "monthly_emissions": [1200, 1150, 1180, 1220, 1190, 1160],
-            "energy_consumption": [8000, 7800, 8100, 8300, 8200, 7900],
-            "production_volume": [100, 95, 98, 102, 99, 96],
-        }
-
-        result = await gemini_esg_service.forecast_carbon_emissions(historical_data)
-        return JSONResponse(content=result)
-
-    except Exception as e:
-        logger.error(f"Gemini carbon forecast error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Carbon forecast failed: {str(e)}")
-
-
-@router.post("/recommendations")
-async def gemini_generate_recommendations(request: RecommendationsRequest):
-    try:
-        logger.info(f"Gemini recommendations for client: {request.clientId}")
-
-        company_profile = request.companyProfile or {
-            "industry": "Technology",
-            "size": "Medium",
-            "current_esg_score": 75,
-            "budget": 100000,
-            "priorities": ["energy", "emissions", "water"],
-        }
-
-        result = await gemini_esg_service.generate_recommendations(company_profile)
-        return JSONResponse(content=result)
-
-    except Exception as e:
-        logger.error(f"Gemini recommendations error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Recommendations failed: {str(e)}")
-
-
-@router.post("/analyze-document")
-async def gemini_analyze_document(
-    document: UploadFile = File(...),
-    analysis_type: str = Form("comprehensive"),
-):
-    try:
-        logger.info(f"Gemini document analysis for: {document.filename}")
-
-        content = await document.read()
-        text = ""
-
-        # Use pypdf which you have installed
-        if (document.filename or "").lower().endswith(".pdf"):
-            try:
-                from pypdf import PdfReader
-                reader = PdfReader(io.BytesIO(content))
-                for page in reader.pages:
-                    text += page.extract_text() or ""
-            except Exception as e:
-                logger.warning(f"PDF text extraction failed, fallback to bytes decode: {e}")
-                text = content.decode("utf-8", errors="ignore")
-        else:
-            text = content.decode("utf-8", errors="ignore")
-
-        result = await gemini_esg_service.analyze_document(text, document.filename or "document")
-        result["analysis_type"] = analysis_type
-
-        return JSONResponse(content=result)
-
-    except Exception as e:
-        logger.error(f"Gemini document analysis error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Document analysis failed: {str(e)}")
+        logger.exception(f"carbon-footprint error: {e}")
+        raise HTTPException(status_code=500, detail="Carbon footprint analysis failed")
 
 
 @router.post("/generate-report")
-async def gemini_generate_report(request: AIReportRequest):
+async def generate_report(payload: Dict):
+    """
+    Expected payload:
+      { "energy_data": [...], "carbon_data": {...}, "water_data": [...] }
+    """
     try:
-        logger.info(f"Gemini report generation for client: {request.clientId}")
-
-        company_data = request.companyData or {
-            "name": "Sample Company",
-            "industry": "Technology",
-            "esg_scores": {"environmental": 76, "social": 82, "governance": 79},
-            "initiatives": ["Solar panels", "Employee wellness", "Board training"],
-        }
-
-        result = await gemini_esg_service.generate_ai_report(company_data, request.reportType)
+        energy_data = payload.get("energy_data") or []
+        carbon_data = payload.get("carbon_data") or {}
+        water_data = payload.get("water_data") or []
+        result = await gemini_esg_service.generate_esg_report(energy_data, carbon_data, water_data)
         return JSONResponse(content=result)
-
     except Exception as e:
-        logger.error(f"Gemini report generation error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
+        logger.exception(f"generate-report error: {e}")
+        raise HTTPException(status_code=500, detail="Report generation failed")
 
 
 @router.post("/refresh")
 async def refresh_gemini_service():
+    """Refresh Gemini service to pick up new environment variables."""
     try:
         gemini_esg_service.refresh_service()
         return JSONResponse(
             content={
                 "message": "Gemini service refreshed",
                 "mock_mode": gemini_esg_service.mock_mode,
-                "model": gemini_esg_service.model_name,
+                "model": gemini_esg_service.model_name if not gemini_esg_service.mock_mode else "fallback",
                 "api_key_configured": not gemini_esg_service.mock_mode,
             }
         )
     except Exception as e:
-        logger.error(f"Gemini refresh error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Refresh failed: {str(e)}")
+        logger.exception(f"refresh error: {e}")
+        raise HTTPException(status_code=500, detail="Refresh failed")
 
 
 @router.get("/status")
@@ -204,118 +118,16 @@ async def get_gemini_status():
         status = {
             "service": "Gemini AI",
             "status": "active",
-            "model": gemini_esg_service.model_name if not gemini_esg_service.mock_mode else "mock",
+            "model": gemini_esg_service.model_name if not gemini_esg_service.mock_mode else "fallback",
             "mock_mode": gemini_esg_service.mock_mode,
             "api_key_configured": not gemini_esg_service.mock_mode,
+            "capabilities": [
+                "Energy trend analytics",
+                "Carbon footprint analytics",
+                "ESG report generation",
+            ],
         }
         return JSONResponse(content=status)
-
     except Exception as e:
-        logger.error(f"Gemini status error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")
-
-
-@router.post("/chat")
-async def gemini_esg_chat(question: str = Form(...), context: str = Form("")):
-    try:
-        logger.info(f"Gemini ESG chat: {question[:50]}...")
-        prompt = f"""
-You are an ESG (Environmental, Social, Governance) expert assistant.
-Answer this question: {question}
-
-Context: {context}
-
-Provide accurate, actionable ESG guidance with specific recommendations.
-Focus on practical sustainability solutions.
-"""
-        result = await gemini_esg_service.chat(prompt)
-        return JSONResponse(content=result)
-
-    except Exception as e:
-        logger.error(f"Gemini chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
-
-
-@router.post("/comprehensive-analysis")
-async def comprehensive_esg_analysis(
-    clientId: str = Form(...),
-    files: List[UploadFile] = File(...),
-    analysis_depth: str = Form("standard"),
-):
-    try:
-        logger.info(f"Comprehensive ESG analysis for client: {clientId}")
-
-        document_data = []
-        for f in files:
-            content = await f.read()
-            text = ""
-
-            if (f.filename or "").lower().endswith(".pdf"):
-                try:
-                    from pypdf import PdfReader
-                    reader = PdfReader(io.BytesIO(content))
-                    for page in reader.pages:
-                        text += page.extract_text() or ""
-                except Exception:
-                    text = content.decode("utf-8", errors="ignore")
-            else:
-                text = content.decode("utf-8", errors="ignore")
-
-            document_data.append(
-                {
-                    "filename": f.filename,
-                    "content": text[:4000],
-                    "type": "pdf" if (f.filename or "").lower().endswith(".pdf") else "text",
-                }
-            )
-
-        result = await gemini_esg_service.comprehensive_analysis(document_data, clientId, analysis_depth)
-        return JSONResponse(content=result)
-
-    except Exception as e:
-        logger.error(f"Comprehensive analysis error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
-
-
-@router.get("/real-time-insights")
-async def get_real_time_esg_insights(clientId: str = None):
-    try:
-        logger.info(f"Real-time ESG insights for client: {clientId}")
-        insights = await gemini_esg_service.real_time_insights(clientId)
-        return JSONResponse(content=insights)
-
-    except Exception as e:
-        logger.error(f"Real-time insights error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Insights failed: {str(e)}")
-
-
-@router.post("/predictive-analytics")
-async def predictive_esg_analytics(
-    clientId: str = Form(...),
-    prediction_type: str = Form("performance"),
-    time_horizon: str = Form("12months"),
-):
-    try:
-        logger.info(f"Predictive ESG analytics for client: {clientId}")
-        result = await gemini_esg_service.predictive_analytics(clientId, prediction_type, time_horizon)
-        return JSONResponse(content=result)
-
-    except Exception as e:
-        logger.error(f"Predictive analytics error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
-
-
-@router.post("/benchmark-analysis")
-async def benchmark_esg_performance(
-    clientId: str = Form(...),
-    industry: str = Form("general"),
-    peer_group: str = Form("industry"),
-):
-    try:
-        logger.info(f"Benchmark analysis for client: {clientId}")
-        result = await gemini_esg_service.benchmark_analysis(clientId, industry, peer_group)
-        return JSONResponse(content=result)
-
-    except Exception as e:
-        logger.error(f"Benchmark analysis error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Benchmark failed: {str(e)}")
+        logger.exception(f"status error: {e}")
+        raise HTTPException(status_code=500, detail="Status check failed")
