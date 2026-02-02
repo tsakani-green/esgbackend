@@ -1,11 +1,11 @@
 # backend/app/api/auth.py
 # NOTE: Uses Mongo (motor) via app.core.database.db
-# Provides: /signup, /activate, /login
+# Provides: /signup, /activate, /login, /me
 # Login accepts BOTH:
 #  - application/x-www-form-urlencoded (OAuth2 style)
 #  - application/json: { "username": "...", "password": "..." }
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
@@ -81,6 +81,65 @@ def create_access_token(user_id: str, username: str, role: str = "user") -> str:
     exp = now_utc() + timedelta(hours=ACCESS_EXPIRE_HOURS)
     payload = {"sub": user_id, "username": username, "role": role, "exp": exp}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+def _normalize_user(user: dict) -> dict:
+    """Return a consistent user shape for frontend consumption."""
+    return {
+        "id": str(user.get("_id")) if user.get("_id") is not None else None,
+        "username": user.get("username"),
+        "email": user.get("email"),
+        "full_name": user.get("full_name"),
+        "role": user.get("role", "user"),
+        "is_active": user.get("is_active", False),
+        "company": user.get("company", ""),
+        "created_at": user.get("created_at"),
+    }
+
+def _get_bearer_token_from_request(request: Request) -> str:
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    auth = auth.strip()
+    if not auth:
+        return ""
+    parts = auth.split()
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return ""
+
+# -------------------------------------------------------------------
+# Auth Dependency (FIXES Render import error)
+# -------------------------------------------------------------------
+
+async def get_current_user(request: Request) -> dict:
+    """
+    Dependency used across routes to authenticate a user via JWT:
+      Authorization: Bearer <token>
+    Returns the Mongo user document (dict).
+    """
+    token = _get_bearer_token_from_request(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # fetch user
+    try:
+        user = await db.users.find_one({"_id": to_object_id(user_id)})
+    except Exception:
+        user = None
+
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    if not user.get("is_active"):
+        raise HTTPException(status_code=403, detail="Account not active")
+
+    return user
 
 # -------------------------------------------------------------------
 # Schemas
@@ -190,8 +249,6 @@ async def login(request: Request):
     Accepts BOTH:
       - Form encoded: username=...&password=...
       - JSON: { "username": "...", "password": "..." }
-
-    This prevents 422 when frontend sends JSON.
     """
     content_type = (request.headers.get("content-type") or "").lower()
 
@@ -213,14 +270,13 @@ async def login(request: Request):
         username = (body.get("username") or "").strip()
         password = (body.get("password") or "")
 
-    # 3) Fallback attempt: try JSON if header was missing
+    # 3) Fallback attempt
     else:
         try:
             body = await request.json()
             username = (body.get("username") or "").strip()
             password = (body.get("password") or "")
         except Exception:
-            # try form as last resort
             try:
                 form = await request.form()
                 username = (form.get("username") or "").strip()
@@ -252,11 +308,12 @@ async def login(request: Request):
         "success": True,
         "access_token": token,
         "token_type": "bearer",
-        "user": {
-            "id": str(user["_id"]),
-            "username": user.get("username"),
-            "email": user.get("email"),
-            "full_name": user.get("full_name"),
-            "role": user.get("role", "user"),
-        },
+        "user": _normalize_user(user),
     }
+
+@router.get("/me")
+async def me(current_user: dict = Depends(get_current_user)):
+    """
+    Frontend calls this endpoint to fetch user profile.
+    """
+    return _normalize_user(current_user)
