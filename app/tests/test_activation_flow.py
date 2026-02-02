@@ -119,98 +119,48 @@ async def test_activate_success(monkeypatch):
     }
     res = await fake_db.users.insert_one(user_doc)
 
-    import importlib, importlib.util, pathlib
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    # Load the exact auth module from the backend app path so we don't pick up
-    # similarly-named modules from other packages.
-    auth_path = pathlib.Path(__file__).resolve().parents[2] / "app" / "api" / "auth.py"
-    spec = importlib.util.spec_from_file_location("esgbackend_auth", str(auth_path))
-    auth_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(auth_mod)
-
-    # build token payload directly
+    # Build an activation token signed with the app SECRET_KEY
     from datetime import datetime, timedelta
     expire = datetime.utcnow() + timedelta(days=7)
-    token = jwt.encode({"sub": "alice", "role": "client", "exp": expire}, auth_mod.settings.SECRET_KEY, algorithm=auth_mod.settings.ALGORITHM)
+    token = jwt.encode({"sub": "alice", "role": "client", "exp": expire}, auth.settings.SECRET_KEY, algorithm=auth.settings.ALGORITHM)
 
-    # Build a minimal FastAPI app and mount the auth endpoints we want to test
-    app_small = FastAPI()
-    app_small.post("/activate")(auth_mod.activate)
-    app_small.get("/me")(auth_mod.me)
-
-    # Override the core DB dependency directly
-    import app.core.database as dbmod
-    app_small.dependency_overrides[dbmod.get_db] = lambda: fake_db
-
-    client = TestClient(app_small)
-
-    r = client.post("/activate", json={"token": token})
-    assert r.status_code == 200
-    data = r.json()
-    assert data["success"] is True
-    assert data["message"] == "Account activated successfully"
+    # Call activate implementation directly with a fake DB dependency
+    func = getattr(auth.activate, "__wrapped__", auth.activate)
+    resp = await func({"token": token}, fake_db)
+    assert resp["success"] is True
+    assert resp["message"] == "Account activated successfully"
 
     # verify that user status was updated
     user = await fake_db.users.find_one({"_id": res.inserted_id})
     assert user.get("status") == "active"
 
 
-def test_activate_invalid_token_raises():
-    import importlib, importlib.util, pathlib
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
+@pytest.mark.asyncio
+async def test_activate_invalid_token_raises():
     fake_db = FakeDB()
 
-    auth_path = pathlib.Path(__file__).resolve().parents[2] / "app" / "api" / "auth.py"
-    spec = importlib.util.spec_from_file_location("esgbackend_auth", str(auth_path))
-    auth_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(auth_mod)
-
-    app_small = FastAPI()
-    app_small.post("/activate")(auth_mod.activate)
-
-    import app.core.database as dbmod
-    app_small.dependency_overrides[dbmod.get_db] = lambda: fake_db
-
-    client = TestClient(app_small)
-
-    r = client.post("/activate", json={"token": "not-a-valid-token"})
-    assert r.status_code == 400
+    # Calling activate with an invalid token should raise HTTPException
+    func = getattr(auth.activate, "__wrapped__", auth.activate)
+    with pytest.raises(HTTPException) as ie:
+        await func({"token": "not-a-valid-token"}, fake_db)
+    assert ie.value.status_code == 400
 
 
-def test_resend_activation_user_not_found():
-    import importlib, importlib.util, pathlib
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
+@pytest.mark.asyncio
+async def test_resend_activation_user_not_found():
     fake_db = FakeDB()
 
-    auth_path = pathlib.Path(__file__).resolve().parents[2] / "app" / "api" / "auth.py"
-    spec = importlib.util.spec_from_file_location("esgbackend_auth", str(auth_path))
-    auth_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(auth_mod)
-
-    app_small = FastAPI()
-    app_small.post("/resend-activation")(auth_mod.resend_activation)
-
-    import app.core.database as dbmod
-    app_small.dependency_overrides[dbmod.get_db] = lambda: fake_db
-
-    client = TestClient(app_small)
-
-    r = client.post("/resend-activation", json={"email": "noone@example.com"})
-    assert r.status_code == 404
+    # Resend activation for non-existent user should raise HTTPException 404
+    from types import SimpleNamespace
+    req = SimpleNamespace(email="noone@example.com")
+    func = getattr(auth.resend_activation, "__wrapped__", auth.resend_activation)
+    with pytest.raises(HTTPException) as ie:
+        await func(req, fake_db)
+    assert ie.value.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_resend_activation_success(monkeypatch):
-    import importlib, importlib.util, pathlib
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
     fake_db = FakeDB()
 
     user_doc = {
@@ -227,25 +177,14 @@ async def test_resend_activation_success(monkeypatch):
     async def fake_send(to_email, name, link):
         return True
 
-    auth_path = pathlib.Path(__file__).resolve().parents[2] / "app" / "api" / "auth.py"
-    spec = importlib.util.spec_from_file_location("esgbackend_auth", str(auth_path))
-    auth_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(auth_mod)
+    # Monkeypatch send_activation_email and environment to development so response includes activation_link
+    monkeypatch.setattr(auth, "send_activation_email", fake_send)
+    monkeypatch.setattr(auth.settings, "ENVIRONMENT", "development")
 
-    monkeypatch.setattr(auth_mod, "send_activation_email", fake_send)
-    monkeypatch.setattr(auth_mod.settings, "ENVIRONMENT", "development")
-
-    app_small = FastAPI()
-    app_small.post("/resend-activation")(auth_mod.resend_activation)
-
-    import app.core.database as dbmod
-    app_small.dependency_overrides[dbmod.get_db] = lambda: fake_db
-
-    client = TestClient(app_small)
-
-    r = client.post("/resend-activation", json={"email": "bob@example.com"})
-    assert r.status_code == 200
-    resp = r.json()
+    from types import SimpleNamespace
+    req = SimpleNamespace(email="bob@example.com")
+    func = getattr(auth.resend_activation, "__wrapped__", auth.resend_activation)
+    resp = await func(req, fake_db)
     assert resp.get("message") in ("Activation email sent", "Failed to send activation email")
     assert "activation_link" in resp
     assert resp.get("email_sent") is True
@@ -253,10 +192,6 @@ async def test_resend_activation_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_current_user_rejects_pending_user(monkeypatch):
-    import importlib
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
     fake_db = FakeDB()
 
     user_doc = {
@@ -269,17 +204,12 @@ async def test_get_current_user_rejects_pending_user(monkeypatch):
     }
     await fake_db.users.insert_one(user_doc)
 
-    auth_mod = importlib.import_module("app.api.auth")
-
+    # Build token and call get_current_user directly (should raise 403 for pending accounts)
     from datetime import datetime, timedelta
     expire = datetime.utcnow() + timedelta(minutes=5)
-    token = jwt.encode({"sub": "charlie", "role": "client", "exp": expire}, auth_mod.settings.SECRET_KEY, algorithm=auth_mod.settings.ALGORITHM)
+    token = jwt.encode({"sub": "charlie", "role": "client", "exp": expire}, auth.settings.SECRET_KEY, algorithm=auth.settings.ALGORITHM)
 
-    app_small = FastAPI()
-    app_small.get("/me")(auth_mod.me)
-    app_small.dependency_overrides[auth_mod.get_db] = lambda: fake_db
-
-    client = TestClient(app_small)
-
-    r = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-    assert r.status_code == 403
+    func = getattr(auth.get_current_user, "__wrapped__", auth.get_current_user)
+    with pytest.raises(HTTPException) as ie:
+        await func(token, fake_db)
+    assert ie.value.status_code == 403

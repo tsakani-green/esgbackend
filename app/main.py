@@ -13,6 +13,10 @@ from .api.recent_activities import router as recent_activities_router
 from .api.assets_sunsynk import router as assets_sunsynk_router
 from .api.assets import router as projects_router
 from .api.meters import router as meters_router
+
+# ✅ Email router
+from .api import email as email_router
+
 from .services.egauge_poller import start_egauge_scheduler
 from .services.egauge_client import diagnose_egauge_connection
 
@@ -68,10 +72,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 # -------------------------------------------------------------------
-# CORS middleware
+# CORS middleware (REAL origins only — no regex)
 # -------------------------------------------------------------------
 def _build_cors_origins() -> list[str]:
-    base = [
+    origins = [
+        # Local dev
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
@@ -84,21 +89,27 @@ def _build_cors_origins() -> list[str]:
         "http://127.0.0.1:3004",
         "http://localhost:3008",
         "http://127.0.0.1:3008",
+
+        # Production frontend (from your code)
         "https://esgfrontend-delta.vercel.app",
     ]
 
-    extra: list[str] = []
+    # Optional: add FRONTEND_URL if set in Render
+    if getattr(settings, "FRONTEND_URL", None):
+        origins.append(settings.FRONTEND_URL.strip().rstrip("/"))
+
+    # Optional: merge in CORS_ORIGINS if set in Render
     try:
         extra = settings.get_cors_origins()
+        for o in extra:
+            o = (o or "").strip().rstrip("/")
+            if o:
+                origins.append(o)
     except Exception as e:
         logger.warning(f"Failed to parse CORS_ORIGINS: {e}")
-        extra = []
-
-    if getattr(settings, "FRONTEND_URL", ""):
-        extra.append(settings.FRONTEND_URL.strip())
 
     merged: list[str] = []
-    for origin in base + extra:
+    for origin in origins:
         origin = (origin or "").strip().rstrip("/")
         if origin and origin not in merged:
             merged.append(origin)
@@ -109,12 +120,9 @@ def _build_cors_origins() -> list[str]:
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
-cors_origin_regex = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -136,6 +144,9 @@ app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
 app.include_router(gemini_ai.router, tags=["Gemini AI"])
 app.include_router(ai_agent.router, prefix="/api/ai", tags=["AI Agent"])
 app.include_router(recent_activities_router, tags=["recent-activities"])
+
+# ✅ Email routes
+app.include_router(email_router.router, prefix="/api/email", tags=["email"])
 
 scheduler = None
 
@@ -234,6 +245,7 @@ async def root():
             "meters": "/api/meters",
             "assets": "/api/assets",
             "health": "/health",
+            "email": "/api/email",
         },
     }
 
