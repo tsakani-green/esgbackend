@@ -1,10 +1,11 @@
 # backend/app/api/auth.py
 # NOTE: Uses Mongo (motor) via app.core.database.db
 # Provides: /signup, /activate, /login, /me
-# Signup ALWAYS sends activation email to provided email.
-# If email sending fails -> returns 500 (NO fallback activation link).
+# Login accepts BOTH:
+#  - application/x-www-form-urlencoded (OAuth2 style)
+#  - application/json: { "username": "...", "password": "..." }
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends, status
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
@@ -50,7 +51,6 @@ def verify_password(plain: str, hashed: str) -> bool:
 # JWT config
 JWT_SECRET = settings.SECRET_KEY
 JWT_ALG = "HS256"
-
 ACCESS_EXPIRE_HOURS = int(getattr(settings, "ACCESS_TOKEN_EXPIRE_HOURS", 24) or 24)
 
 # Activation token config
@@ -81,57 +81,41 @@ def create_access_token(user_id: str, username: str, role: str = "user") -> str:
     payload = {"sub": user_id, "username": username, "role": role, "exp": exp}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-def _normalize_user(user: dict) -> dict:
+def decode_access_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+# -------------------------------------------------------------------
+# Auth dependency used by other routers (FIXES Render ImportError)
+# -------------------------------------------------------------------
+async def get_current_user(request: Request) -> dict:
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+
+    token = auth.split(" ", 1)[1].strip()
+    payload = decode_access_token(token)
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    user = await db.users.find_one({"_id": to_object_id(user_id)})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
     return {
-        "id": str(user.get("_id")) if user.get("_id") is not None else None,
+        "id": str(user["_id"]),
         "username": user.get("username"),
         "email": user.get("email"),
         "full_name": user.get("full_name"),
         "role": user.get("role", "user"),
         "is_active": user.get("is_active", False),
         "company": user.get("company", ""),
-        "created_at": user.get("created_at"),
     }
-
-def _get_bearer_token_from_request(request: Request) -> str:
-    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
-    auth = auth.strip()
-    if not auth:
-        return ""
-    parts = auth.split()
-    if len(parts) == 2 and parts[0].lower() == "bearer":
-        return parts[1].strip()
-    return ""
-
-# -------------------------------------------------------------------
-# Auth Dependency
-# -------------------------------------------------------------------
-
-async def get_current_user(request: Request) -> dict:
-    token = _get_bearer_token_from_request(request)
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing Bearer token")
-
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    try:
-        user = await db.users.find_one({"_id": to_object_id(user_id)})
-    except Exception:
-        user = None
-
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-
-    if not user.get("is_active"):
-        raise HTTPException(status_code=403, detail="Account not active")
-
-    return user
 
 # -------------------------------------------------------------------
 # Schemas
@@ -146,6 +130,10 @@ class SignupIn(BaseModel):
 
 class ActivateIn(BaseModel):
     token: str
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
 
 # -------------------------------------------------------------------
 # Routes
@@ -179,20 +167,13 @@ async def signup(payload: SignupIn):
     token = make_activation_token(user_id=user_id, email=email)
     activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
 
-    # ✅ REQUIRED: always send email, no fallback
+    # IMPORTANT: do NOT fall back to returning activation link.
+    # If email sending fails, raise an error so the client sees it.
     try:
         send_activation_email(email, full_name, activation_link)
     except Exception as e:
-        logger.exception(f"Activation email send failed for {email}: {e}")
-        # Optional: rollback user creation so you don't accumulate inactive users with no email
-        try:
-            await db.users.delete_one({"_id": to_object_id(user_id)})
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to send activation email. Please try again later or contact support."
-        )
+        logger.exception(f"Failed to send activation email to {email}: {e}")
+        raise HTTPException(status_code=503, detail="Failed to send activation email. Please try again later.")
 
     return {
         "success": True,
@@ -245,20 +226,38 @@ async def login(request: Request):
     """
     content_type = (request.headers.get("content-type") or "").lower()
 
-    username = ""
-    password = ""
+    username = None
+    password = None
 
+    # 1) Form (OAuth2 style)
     if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
         form = await request.form()
         username = (form.get("username") or "").strip()
         password = (form.get("password") or "")
-    else:
+
+    # 2) JSON
+    elif "application/json" in content_type:
         try:
             body = await request.json()
         except Exception:
             body = {}
         username = (body.get("username") or "").strip()
         password = (body.get("password") or "")
+
+    # 3) Fallback attempt: try JSON if header was missing
+    else:
+        try:
+            body = await request.json()
+            username = (body.get("username") or "").strip()
+            password = (body.get("password") or "")
+        except Exception:
+            try:
+                form = await request.form()
+                username = (form.get("username") or "").strip()
+                password = (form.get("password") or "")
+            except Exception:
+                username = ""
+                password = ""
 
     if not username or not password:
         raise HTTPException(status_code=400, detail="Missing username or password")
@@ -283,9 +282,15 @@ async def login(request: Request):
         "success": True,
         "access_token": token,
         "token_type": "bearer",
-        "user": _normalize_user(user),
+        "user": {
+            "id": str(user["_id"]),
+            "username": user.get("username"),
+            "email": user.get("email"),
+            "full_name": user.get("full_name"),
+            "role": user.get("role", "user"),
+        },
     }
 
 @router.get("/me")
 async def me(current_user: dict = Depends(get_current_user)):
-    return _normalize_user(current_user)
+    return current_user
