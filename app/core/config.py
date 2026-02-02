@@ -11,15 +11,13 @@ class Settings(BaseSettings):
     DEBUG: bool = Field(default=False)
     ENVIRONMENT: str = Field(default="production")
 
-    # ✅ REQUIRED by auth.py
     SECRET_KEY: str = Field(default="change-me")
-
     ACCESS_TOKEN_EXPIRE_HOURS: int = Field(default=24)
 
     FRONTEND_URL: str | None = None
     CORS_ORIGINS: str | None = None
 
-    # ✅ REQUIRED by database.py
+    # Mongo
     MONGODB_URL: str | None = None
 
     def get_mongo_uri(self) -> str:
@@ -30,7 +28,7 @@ class Settings(BaseSettings):
     # eGauge
     EGAUGE_BASE_URL: str | None = None
 
-    # ✅ SMTP (Render env vars)
+    # SMTP
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587
     SMTP_USER: str | None = None
