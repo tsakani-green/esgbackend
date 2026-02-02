@@ -82,7 +82,7 @@ def _build_cors_origins() -> list[str]:
 
     merged: list[str] = []
     for origin in base + extra:
-        origin = (origin or "").strip().rstrip("/")  # IMPORTANT: normalize trailing slash
+        origin = (origin or "").strip().rstrip("/")  # normalize trailing slash
         if origin and origin not in merged:
             merged.append(origin)
 
@@ -93,21 +93,23 @@ cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
 # Allow localhost/127.0.0.1 on ANY port in dev (covers 3004, etc.)
-# NOTE: This does NOT allow random domains; it only matches localhost/127.0.0.1
 cors_origin_regex = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,          # explicit allow-list
+    allow_origins=cors_origins,           # explicit allow-list
     allow_origin_regex=cors_origin_regex, # plus dev regex for localhost ports
     allow_credentials=True,
-    allow_methods=["*"],                 # includes OPTIONS preflight
+    allow_methods=["*"],                  # includes OPTIONS preflight
     allow_headers=["*"],
 )
 
 # -------------------------------------------------------------------
 # Routers
 # -------------------------------------------------------------------
+# IMPORTANT:
+# Your activation + signup/login endpoints live in auth.router, which is mounted at /api/auth here.
+# e.g. /api/auth/signup, /api/auth/activate, /api/auth/login
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(sunsynk.router, prefix="/api/sunsynk", tags=["sunsynk"])
@@ -133,7 +135,7 @@ def _dump_routes():
     print("REGISTERED ROUTES")
     print("=" * 60)
 
-    routes_by_prefix = {}
+    routes_by_prefix: dict[str, list[str]] = {}
     for route in app.routes:
         path = getattr(route, "path", "")
         methods = ",".join(sorted(getattr(route, "methods", []) or []))
@@ -186,8 +188,12 @@ async def on_startup():
     # Log AI readiness (helpful for dev / troubleshooting)
     try:
         from app.services.gemini_esg import get_gemini_esg_service
+
         gemini = get_gemini_esg_service()
-        logger.info(f"Gemini AI enabled: {not getattr(gemini, 'mock_mode', True)}; model={getattr(gemini, 'model_name', None)}")
+        logger.info(
+            f"Gemini AI enabled: {not getattr(gemini, 'mock_mode', True)}; "
+            f"model={getattr(gemini, 'model_name', None)}"
+        )
     except Exception as e:
         logger.warning(f"Unable to determine Gemini AI status: {e}")
 
@@ -218,6 +224,7 @@ async def root():
             "meters": "/api/meters",
             "assets": "/api/assets",
             "health": "/health",
+            "auth": "/api/auth",
         },
     }
 
