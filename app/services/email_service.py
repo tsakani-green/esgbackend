@@ -1,102 +1,105 @@
 # backend/app/services/email_service.py
 
+import os
 import smtplib
-import socket
+import ssl
+import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Optional
 
-from app.core.config import settings
+logger = logging.getLogger(__name__)
 
+def _env(name: str, default: str = "") -> str:
+    return (os.getenv(name) or default).strip()
 
-class EmailSendError(Exception):
-    pass
-
-
-def send_email(
-    to_email: str,
-    subject: str,
-    html_body: str,
-    text_body: Optional[str] = None,
-) -> None:
+def send_activation_email(to_email: str, full_name: str, activation_link: str) -> None:
     """
-    Gmail SMTP sender:
-      - SMTP_HOST=smtp.gmail.com
-      - SMTP_PORT=587
-      - STARTTLS
-      - SMTP_PASS must be a Google App Password
+    Sends activation email via SMTP.
+    Raises exception on failure (caller will return 503).
     """
+
+    smtp_host = _env("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(_env("SMTP_PORT", "587") or "587")
+    smtp_user = _env("SMTP_USER")
+    smtp_pass = _env("SMTP_PASS")
+
+    # Important: Gmail often requires FROM to match the authenticated account
+    from_email = _env("FROM_EMAIL") or smtp_user
+
+    if not smtp_user or not smtp_pass:
+        raise RuntimeError("SMTP_USER/SMTP_PASS not set in environment")
+
+    if not to_email:
+        raise ValueError("to_email is required")
+    if not activation_link:
+        raise ValueError("activation_link is required")
+
+    subject = "Activate your ESG Dashboard account"
+
+    # Plain + HTML (better deliverability)
+    text_body = f"""Hi {full_name or ''},
+
+Welcome! Please activate your account using this link:
+
+{activation_link}
+
+If you didn’t request this, ignore this email.
+"""
+
+    html_body = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif;">
+        <p>Hi {full_name or ''},</p>
+        <p>Welcome! Please activate your account by clicking the button below:</p>
+        <p>
+          <a href="{activation_link}"
+             style="display:inline-block;padding:10px 16px;background:#2e7d32;color:#fff;
+                    text-decoration:none;border-radius:6px;">
+            Activate Account
+          </a>
+        </p>
+        <p>If the button doesn't work, copy/paste this link:</p>
+        <p><a href="{activation_link}">{activation_link}</a></p>
+        <p>If you didn’t request this, ignore this email.</p>
+      </body>
+    </html>
+    """
+
     msg = MIMEMultipart("alternative")
-    msg["From"] = settings.SMTP_USER
+    msg["From"] = from_email
     msg["To"] = to_email
     msg["Subject"] = subject
 
-    if text_body:
-        msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    host = (settings.SMTP_HOST or "").strip()
-    port = int(getattr(settings, "SMTP_PORT", 587))
-    user = (settings.SMTP_USER or "").strip()
-    password = settings.SMTP_PASS  # keep exactly as stored in Render
+    logger.info(f"Sending activation email via SMTP {smtp_host}:{smtp_port} as {smtp_user} to {to_email}")
 
-    if not host or not user or not password:
-        raise EmailSendError("SMTP config missing (SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS).")
-
+    # STARTTLS for 587
+    context = ssl.create_default_context()
+    server = None
     try:
-        with smtplib.SMTP(host, port, timeout=25) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(user, password)
-            server.sendmail(user, [to_email], msg.as_string())
+        server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+        server.ehlo()
+        server.starttls(context=context)
+        server.ehlo()
 
+        server.login(smtp_user, smtp_pass)
+        server.sendmail(from_email, [to_email], msg.as_string())
+
+        logger.info(f"Activation email sent to {to_email}")
     except smtplib.SMTPAuthenticationError as e:
-        raise EmailSendError(f"SMTP auth failed (Gmail): {e}") from e
-    except smtplib.SMTPConnectError as e:
-        raise EmailSendError(f"SMTP connect error: {e}") from e
-    except smtplib.SMTPServerDisconnected as e:
-        raise EmailSendError(f"SMTP disconnected: {e}") from e
-    except socket.gaierror as e:
-        raise EmailSendError(f"SMTP DNS error (check SMTP_HOST): {e}") from e
+        logger.exception("SMTP AUTH FAILED (wrong app password / 2FA not set / wrong user)")
+        raise
+    except smtplib.SMTPException as e:
+        logger.exception(f"SMTP ERROR: {e}")
+        raise
     except Exception as e:
-        raise EmailSendError(f"Email send failed: {type(e).__name__}: {e}") from e
-
-
-# -------------------------------------------------------------------
-# ✅ Function expected by your backend/app/api/auth.py
-# -------------------------------------------------------------------
-def send_activation_email(to_email: str, full_name: str, activation_link: str) -> None:
-    safe_name = (full_name or "").strip() or "there"
-    subject = "Activate your account"
-
-    html = f"""
-    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
-      <h2>Welcome, {safe_name} 👋</h2>
-      <p>Your account was created successfully. Please activate it using the link below:</p>
-
-      <p style="margin: 24px 0;">
-        <a href="{activation_link}"
-           style="display:inline-block;padding:12px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px">
-          Activate Account
-        </a>
-      </p>
-
-      <p>If the button doesn’t work, copy and paste this link into your browser:</p>
-      <p><a href="{activation_link}">{activation_link}</a></p>
-
-      <hr />
-      <p style="color:#666;font-size:12px;">
-        If you didn’t request this, you can ignore this email.
-      </p>
-    </div>
-    """
-
-    text = f"Hi {safe_name}, activate your account here: {activation_link}"
-
-    send_email(
-        to_email=to_email,
-        subject=subject,
-        html_body=html,
-        text_body=text,
-    )
+        logger.exception(f"EMAIL SEND ERROR: {e}")
+        raise
+    finally:
+        try:
+            if server:
+                server.quit()
+        except Exception:
+            pass
