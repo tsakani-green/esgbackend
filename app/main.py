@@ -15,13 +15,18 @@ from .api.meters import router as meters_router
 from .services.egauge_poller import start_egauge_scheduler
 from .services.egauge_client import diagnose_egauge_connection
 
-# Configure logging
+# -------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+# -------------------------------------------------------------------
+# App
+# -------------------------------------------------------------------
 app = FastAPI(
     title="ESG Dashboard API",
     version="1.0.0",
@@ -65,13 +70,13 @@ def _build_cors_origins() -> list[str]:
         "http://127.0.0.1:3004",
         "http://localhost:3008",
         "http://127.0.0.1:3008",
-        # Production Vercel frontend
+        # Production Vercel frontend (your current)
         "https://esgfrontend-delta.vercel.app",
     ]
 
     extra: list[str] = []
     try:
-        extra = settings.get_cors_origins()  # already list[str]
+        extra = settings.get_cors_origins()  # expects list[str]
     except Exception as e:
         logger.warning(f"Failed to parse CORS_ORIGINS: {e}")
         extra = []
@@ -92,24 +97,29 @@ def _build_cors_origins() -> list[str]:
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
-# Allow localhost/127.0.0.1 on ANY port in dev (covers 3004, etc.)
+# Allow localhost/127.0.0.1 on ANY port in dev
 cors_origin_regex = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
+# Optional: allow Vercel preview domains if you need them
+# Example env: VERCEL_ORIGIN_REGEX="^https://.*\\.vercel\\.app$"
+vercel_regex = getattr(settings, "VERCEL_ORIGIN_REGEX", None)
+if vercel_regex:
+    # Combine regex patterns safely by using a single pattern with alternation
+    cors_origin_regex = f"(?:{cors_origin_regex})|(?:{vercel_regex})"
+    logger.info(f"Using combined CORS origin regex: {cors_origin_regex}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,           # explicit allow-list
-    allow_origin_regex=cors_origin_regex, # plus dev regex for localhost ports
+    allow_origins=cors_origins,
+    allow_origin_regex=cors_origin_regex,
     allow_credentials=True,
-    allow_methods=["*"],                  # includes OPTIONS preflight
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -------------------------------------------------------------------
 # Routers
 # -------------------------------------------------------------------
-# IMPORTANT:
-# Your activation + signup/login endpoints live in auth.router, which is mounted at /api/auth here.
-# e.g. /api/auth/signup, /api/auth/activate, /api/auth/login
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(sunsynk.router, prefix="/api/sunsynk", tags=["sunsynk"])
@@ -135,7 +145,7 @@ def _dump_routes():
     print("REGISTERED ROUTES")
     print("=" * 60)
 
-    routes_by_prefix: dict[str, list[str]] = {}
+    routes_by_prefix = {}
     for route in app.routes:
         path = getattr(route, "path", "")
         methods = ",".join(sorted(getattr(route, "methods", []) or []))
@@ -188,7 +198,6 @@ async def on_startup():
     # Log AI readiness (helpful for dev / troubleshooting)
     try:
         from app.services.gemini_esg import get_gemini_esg_service
-
         gemini = get_gemini_esg_service()
         logger.info(
             f"Gemini AI enabled: {not getattr(gemini, 'mock_mode', True)}; "
@@ -224,7 +233,6 @@ async def root():
             "meters": "/api/meters",
             "assets": "/api/assets",
             "health": "/health",
-            "auth": "/api/auth",
         },
     }
 
