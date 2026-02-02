@@ -1,16 +1,11 @@
 # backend/app/api/auth.py
-# Mongo (motor) via app.core.database.db
-# Email activation + JWT login + dependency helpers (get_current_user)
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, HTTPException, Depends, status
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
 import os
 import logging
-from typing import Optional, Any, Dict
-
-from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 
 from app.core.config import settings
 from app.core.database import db
@@ -31,56 +26,33 @@ router = APIRouter()
 def to_object_id(value: str):
     if ObjectId is None:
         raise RuntimeError("bson.ObjectId not available. Install pymongo/bson.")
-    # If value is already an ObjectId, keep it
-    if isinstance(value, ObjectId):
-        return value
-    return ObjectId(str(value))
+    return ObjectId(value)
 
 def now_utc():
     return datetime.now(timezone.utc)
 
-# Password hashing (keep simple; replace with your existing utils if you already have them elsewhere)
+# Password hashing (shared context)
 from passlib.context import CryptContext
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return _pwd_context.hash(password)
 
 def verify_password(plain: str, hashed: str) -> bool:
     if not hashed:
         return False
-    return pwd_context.verify(plain, hashed)
+    return _pwd_context.verify(plain, hashed)
 
-# -------------------------------------------------------------------
 # JWT config
-# -------------------------------------------------------------------
-
 JWT_SECRET = settings.SECRET_KEY
 JWT_ALG = "HS256"
-
 ACCESS_EXPIRE_HOURS = int(getattr(settings, "ACCESS_TOKEN_EXPIRE_HOURS", 24) or 24)
 
+# Activation token config
 ACTIVATE_SECRET = settings.SECRET_KEY
 ACTIVATE_ALG = "HS256"
 EXPIRE_HOURS = int(os.getenv("ACTIVATION_TOKEN_EXPIRE_HOURS", "24"))
-
-FRONTEND_URL = (
-    (getattr(settings, "FRONTEND_URL", "") or os.getenv("FRONTEND_URL", "")) or ""
-).rstrip("/")
-
-def create_access_token(user_id: str, username: str, role: str = "user") -> str:
-    exp = now_utc() + timedelta(hours=ACCESS_EXPIRE_HOURS)
-    payload = {"type": "access", "sub": user_id, "username": username, "role": role, "exp": exp}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-def decode_access_token(token: str) -> dict:
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        if payload.get("type") != "access":
-            raise HTTPException(status_code=401, detail="Invalid token type")
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+FRONTEND_URL = ((getattr(settings, "FRONTEND_URL", "") or os.getenv("FRONTEND_URL", "")) or "").rstrip("/")
 
 def make_activation_token(user_id: str, email: str) -> str:
     exp = now_utc() + timedelta(hours=EXPIRE_HOURS)
@@ -101,56 +73,24 @@ def verify_activation_token(token: str) -> dict:
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid or expired activation token")
 
-# -------------------------------------------------------------------
-# Auth dependencies (IMPORTANT: fixes Render crash)
-# -------------------------------------------------------------------
+def create_access_token(user_id: str, username: str, role: str = "user") -> str:
+    exp = now_utc() + timedelta(hours=ACCESS_EXPIRE_HOURS)
+    payload = {"sub": user_id, "username": username, "role": role, "exp": exp}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-# Works with Swagger "Authorize" for OAuth2 password bearer style
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+def decode_access_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
-# Also supports Authorization: Bearer <token> robustly (some clients prefer this)
-http_bearer = HTTPBearer(auto_error=False)
-
-async def _extract_token(
-    oauth_token: str = Depends(oauth2_scheme),
-    bearer: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
-) -> str:
-    """
-    Prefer explicit Authorization header if present; otherwise use oauth2 token.
-    """
-    if bearer and bearer.scheme.lower() == "bearer" and bearer.credentials:
-        return bearer.credentials
-    if oauth_token:
-        return oauth_token
-    raise HTTPException(status_code=401, detail="Not authenticated")
-
-async def get_current_user(token: str = Depends(_extract_token)) -> Dict[str, Any]:
-    """
-    ✅ This is the function other routers import.
-    Returns the DB user document (dict).
-    """
-    data = decode_access_token(token)
-    user_id = data.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
-
-    user = await db.users.find_one({"_id": to_object_id(user_id)})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-
-    # attach token claims (useful for debugging/role checks)
-    user["_token"] = data
-    return user
-
-async def get_current_active_user(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    if not user.get("is_active"):
-        raise HTTPException(status_code=403, detail="Account not activated.")
-    return user
-
-def require_admin(user: Dict[str, Any] = Depends(get_current_active_user)) -> Dict[str, Any]:
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
+def _extract_bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Authorization header")
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Authorization header")
+    return parts[1].strip()
 
 # -------------------------------------------------------------------
 # Schemas
@@ -161,14 +101,77 @@ class SignupIn(BaseModel):
     email: EmailStr
     password: str
     full_name: str
-    company: Optional[str] = None
+    company: str | None = None
 
 class ActivateIn(BaseModel):
     token: str
 
 class LoginIn(BaseModel):
-    username: str
+    # ✅ Accept BOTH username and email so the frontend can send either one without 422
+    username: str | None = None
+    email: EmailStr | None = None
+    # optional alternate key some frontends use:
+    usernameOrEmail: str | None = Field(default=None)
     password: str
+
+    @model_validator(mode="after")
+    def validate_identifier(self):
+        if not (self.username or self.email or self.usernameOrEmail):
+            raise ValueError("Provide username or email")
+        return self
+
+class TokenOut(BaseModel):
+    success: bool = True
+    access_token: str
+    token_type: str = "bearer"
+    # ✅ add `token` alias so older frontend code that stores `token` keeps working
+    token: str
+    user: dict
+
+# -------------------------------------------------------------------
+# Auth dependencies (fixes Render ImportError)
+# -------------------------------------------------------------------
+
+async def get_current_user(authorization: str = Depends(lambda: None)):
+    """
+    Usage:
+      from app.api.auth import get_current_user
+      @router.get("/me")
+      async def me(user=Depends(get_current_user)): ...
+    """
+    # FastAPI can't inject raw headers via lambda(None) reliably,
+    # so we instead fetch via request headers in a small wrapper below.
+    raise RuntimeError("Use get_current_user_dep (see below)")
+
+from fastapi import Request
+
+async def get_current_user_dep(request: Request):
+    token = _extract_bearer_token(request.headers.get("Authorization"))
+    payload = decode_access_token(token)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+
+    user = await db.users.find_one({"_id": to_object_id(user_id)})
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    if not user.get("is_active"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account inactive. Please activate your account.")
+
+    # normalize id to string
+    user["id"] = str(user["_id"])
+    user.pop("_id", None)
+    user.pop("hashed_password", None)
+    return user
+
+async def admin_required(user=Depends(get_current_user_dep)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
+    return user
+
+# ✅ Backwards-compatible export so imports like `from app.api.auth import get_current_user` work:
+get_current_user = get_current_user_dep
 
 # -------------------------------------------------------------------
 # Routes
@@ -181,9 +184,6 @@ async def signup(payload: SignupIn):
     full_name = payload.full_name.strip()
     company = (payload.company or "").strip()
 
-    if not username or not email or not full_name:
-        raise HTTPException(status_code=400, detail="Missing required fields")
-
     existing = await db.users.find_one({"$or": [{"email": email}, {"username": username}]})
     if existing:
         raise HTTPException(status_code=400, detail="User already exists")
@@ -195,7 +195,7 @@ async def signup(payload: SignupIn):
         "company": company,
         "hashed_password": hash_password(payload.password),
         "role": "user",
-        "is_active": False,   # MUST activate via email
+        "is_active": False,
         "created_at": now_utc(),
     }
 
@@ -207,10 +207,8 @@ async def signup(payload: SignupIn):
 
     activation_link_return = None
     try:
-        # If your service is async, change to: await send_activation_email(...)
         send_activation_email(email, full_name, activation_link)
     except Exception as e:
-        # Dev fallback: return activation link so you can still activate without SMTP
         logger.warning(f"Activation email not sent (fallback to activation_link): {e}")
         activation_link_return = activation_link
 
@@ -255,56 +253,48 @@ async def activate(body: ActivateIn):
             "email": user.get("email"),
             "full_name": user.get("full_name"),
         },
-        # OPTIONAL auto login:
-        # "auto_login_token": create_access_token(user_id=str(user["_id"]), username=user["username"], role=user.get("role", "user")),
     }
 
-@router.post("/login")
+@router.post("/login", response_model=TokenOut)
 async def login(payload: LoginIn):
-    username = payload.username.strip()
+    identifier = (
+        (payload.username or "").strip()
+        or (payload.email.lower().strip() if payload.email else "")
+        or (payload.usernameOrEmail or "").strip()
+    )
 
-    user = await db.users.find_one({"username": username})
+    if not identifier:
+        raise HTTPException(status_code=422, detail="username/email is required")
+
+    # ✅ allow login via username OR email
+    user = await db.users.find_one({"$or": [{"username": identifier}, {"email": identifier.lower()}]})
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+        raise HTTPException(status_code=401, detail="Invalid username/email or password")
 
     if not user.get("is_active"):
         raise HTTPException(status_code=403, detail="Please activate your account via the email link.")
 
     if not verify_password(payload.password, user.get("hashed_password", "")):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+        raise HTTPException(status_code=401, detail="Invalid username/email or password")
 
     token = create_access_token(
         user_id=str(user["_id"]),
-        username=user.get("username", ""),
+        username=user.get("username", identifier),
         role=user.get("role", "user"),
     )
+
+    user_out = {
+        "id": str(user["_id"]),
+        "username": user.get("username"),
+        "email": user.get("email"),
+        "full_name": user.get("full_name"),
+        "role": user.get("role", "user"),
+    }
 
     return {
         "success": True,
         "access_token": token,
+        "token": token,  # ✅ keeps your localStorage('token') logic working
         "token_type": "bearer",
-        "user": {
-            "id": str(user["_id"]),
-            "username": user.get("username"),
-            "email": user.get("email"),
-            "full_name": user.get("full_name"),
-            "role": user.get("role", "user"),
-        },
-    }
-
-# -------------------------------------------------------------------
-# Optional: current user endpoint (useful for frontend debug)
-# -------------------------------------------------------------------
-@router.get("/me")
-async def me(user: Dict[str, Any] = Depends(get_current_active_user)):
-    return {
-        "success": True,
-        "user": {
-            "id": str(user["_id"]),
-            "username": user.get("username"),
-            "email": user.get("email"),
-            "full_name": user.get("full_name"),
-            "role": user.get("role", "user"),
-            "company": user.get("company", ""),
-        },
+        "user": user_out,
     }
