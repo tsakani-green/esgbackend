@@ -1,9 +1,8 @@
 # backend/app/api/auth.py
 # NOTE: Uses Mongo (motor) via app.core.database.db
 # Provides: /signup, /activate, /login, /me
-# Login accepts BOTH:
-#  - application/x-www-form-urlencoded (OAuth2 style)
-#  - application/json: { "username": "...", "password": "..." }
+# Signup ALWAYS sends activation email to provided email.
+# If email sending fails -> returns 500 (NO fallback activation link).
 
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, EmailStr
@@ -36,7 +35,7 @@ def to_object_id(value: str):
 def now_utc():
     return datetime.now(timezone.utc)
 
-# Password hashing (reuse a single context)
+# Password hashing
 from passlib.context import CryptContext
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -83,7 +82,6 @@ def create_access_token(user_id: str, username: str, role: str = "user") -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 def _normalize_user(user: dict) -> dict:
-    """Return a consistent user shape for frontend consumption."""
     return {
         "id": str(user.get("_id")) if user.get("_id") is not None else None,
         "username": user.get("username"),
@@ -106,15 +104,10 @@ def _get_bearer_token_from_request(request: Request) -> str:
     return ""
 
 # -------------------------------------------------------------------
-# Auth Dependency (FIXES Render import error)
+# Auth Dependency
 # -------------------------------------------------------------------
 
 async def get_current_user(request: Request) -> dict:
-    """
-    Dependency used across routes to authenticate a user via JWT:
-      Authorization: Bearer <token>
-    Returns the Mongo user document (dict).
-    """
     token = _get_bearer_token_from_request(request)
     if not token:
         raise HTTPException(status_code=401, detail="Missing Bearer token")
@@ -127,7 +120,6 @@ async def get_current_user(request: Request) -> dict:
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    # fetch user
     try:
         user = await db.users.find_one({"_id": to_object_id(user_id)})
     except Exception:
@@ -154,10 +146,6 @@ class SignupIn(BaseModel):
 
 class ActivateIn(BaseModel):
     token: str
-
-class LoginIn(BaseModel):
-    username: str
-    password: str
 
 # -------------------------------------------------------------------
 # Routes
@@ -191,17 +179,24 @@ async def signup(payload: SignupIn):
     token = make_activation_token(user_id=user_id, email=email)
     activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
 
-    activation_link_return = None
+    # ✅ REQUIRED: always send email, no fallback
     try:
         send_activation_email(email, full_name, activation_link)
     except Exception as e:
-        logger.warning(f"Activation email not sent (fallback to activation_link): {e}")
-        activation_link_return = activation_link
+        logger.exception(f"Activation email send failed for {email}: {e}")
+        # Optional: rollback user creation so you don't accumulate inactive users with no email
+        try:
+            await db.users.delete_one({"_id": to_object_id(user_id)})
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to send activation email. Please try again later or contact support."
+        )
 
     return {
         "success": True,
         "message": "Account created. Please check your email to activate your account.",
-        "activation_link": activation_link_return,
     }
 
 @router.post("/activate")
@@ -239,8 +234,6 @@ async def activate(body: ActivateIn):
             "email": user.get("email"),
             "full_name": user.get("full_name"),
         },
-        # OPTIONAL:
-        # "auto_login_token": create_access_token(user_id=str(user["_id"]), username=user["username"], role=user.get("role","user")),
     }
 
 @router.post("/login")
@@ -252,38 +245,20 @@ async def login(request: Request):
     """
     content_type = (request.headers.get("content-type") or "").lower()
 
-    username = None
-    password = None
+    username = ""
+    password = ""
 
-    # 1) Form (OAuth2 style)
     if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
         form = await request.form()
         username = (form.get("username") or "").strip()
         password = (form.get("password") or "")
-
-    # 2) JSON
-    elif "application/json" in content_type:
+    else:
         try:
             body = await request.json()
         except Exception:
             body = {}
         username = (body.get("username") or "").strip()
         password = (body.get("password") or "")
-
-    # 3) Fallback attempt
-    else:
-        try:
-            body = await request.json()
-            username = (body.get("username") or "").strip()
-            password = (body.get("password") or "")
-        except Exception:
-            try:
-                form = await request.form()
-                username = (form.get("username") or "").strip()
-                password = (form.get("password") or "")
-            except Exception:
-                username = ""
-                password = ""
 
     if not username or not password:
         raise HTTPException(status_code=400, detail="Missing username or password")
@@ -313,7 +288,4 @@ async def login(request: Request):
 
 @router.get("/me")
 async def me(current_user: dict = Depends(get_current_user)):
-    """
-    Frontend calls this endpoint to fetch user profile.
-    """
     return _normalize_user(current_user)
