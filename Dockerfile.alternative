@@ -1,0 +1,39 @@
+# Alternative Dockerfile with network resilience
+FROM python:3.11
+
+WORKDIR /app
+
+# Set environment variables for better connectivity
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install system dependencies with retry logic
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Test network connectivity
+RUN curl -I https://pypi.org/simple/ || echo "Network check completed"
+
+# Copy requirements first for better caching
+COPY ./app/requirements.txt ./requirements.txt
+
+# Install Python dependencies with timeout and retry
+RUN pip install --no-cache-dir --timeout=60 --retries=3 -r requirements.txt
+
+# Copy application code
+COPY ./app/ .
+
+# Create necessary directories
+RUN mkdir -p uploads
+
+EXPOSE 8002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8002/health || exit 1
+
+# Run the application
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

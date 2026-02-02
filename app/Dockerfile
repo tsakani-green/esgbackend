@@ -1,17 +1,13 @@
+
 FROM python:3.11-slim
+
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements from ROOT (not app/)
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY . /app
 
-# Copy the entire esgbackend folder (which contains app/, api/, etc.)
-COPY esgbackend /app/esgbackend
 
-# Create uploads directory
-RUN mkdir -p /app/uploads
+RUN pip install --no-cache-dir -r app/requirements.txt
 
-# Change the CMD to point to the correct location
-CMD ["sh", "-c", "cd /app/esgbackend && uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
+
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
