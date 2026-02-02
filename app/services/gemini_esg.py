@@ -1,914 +1,418 @@
-# Gemini AI Service for ESG Analysis
-import google.generativeai as genai
-import os
-import json
-import logging
-from typing import Dict, List, Optional
-from datetime import datetime
+# backend/app/services/gemini_esg.py
 
-from app.core.config import settings
+import os
+import io
+import logging
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-class GeminiESGService:
+
+class GeminiAnalyticsService:
+    """
+    Single service used by all Gemini endpoints.
+    - If GEMINI_API_KEY is missing -> mock_mode True (fallback outputs)
+    - If GEMINI_API_KEY exists -> uses google-generativeai (lazy import)
+    """
+
     def __init__(self):
-        """Initialize Gemini AI for ESG analysis (prefer pydantic `settings` for config)."""
-        # Prefer the application's Settings (ensures .env is respected when pydantic loads it)
-        api_key = getattr(settings, 'GEMINI_API_KEY', '') or ''
+        self.api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        self.model_name = (os.getenv("GEMINI_MODEL") or "gemini-1.5-flash").strip()
 
-        if not api_key:
-            logger.warning("Gemini API key not configured. Using mock responses.")
+        self.enabled = bool(self.api_key)
+        self.mock_mode = not self.enabled
+
+        self._genai = None
+        self._model = None
+
+        if not self.enabled:
+            logger.warning("GEMINI_API_KEY not found. Using fallback analytics (mock_mode=True).")
+        else:
+            self._init_client()
+
+    def _init_client(self):
+        """Initialize Gemini client lazily and safely."""
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.api_key)
+            self._genai = genai
+            self._model = genai.GenerativeModel(self.model_name)
+            self.mock_mode = False
+            self.enabled = True
+            logger.info(f"Gemini AI ready: model={self.model_name}")
+        except Exception as e:
+            self._genai = None
+            self._model = None
+            self.enabled = False
             self.mock_mode = True
-        else:
-            try:
-                genai.configure(api_key=api_key)
-                model_name = getattr(settings, 'GEMINI_MODEL_ESG', 'gemini-1.5-flash')
-                self.model = genai.GenerativeModel(model_name)
-                self.model_name = model_name
-                self.mock_mode = False
-                logger.info(f"Gemini AI initialized with model: {model_name}")
-            except Exception as e:
-                logger.error(f"Failed to initialize Gemini: {str(e)}")
-                self.mock_mode = True
-    
-    async def predict_esg_scores(self, client_data: Dict) -> Dict:
-        """Predict ESG scores using Gemini AI"""
-        if self.mock_mode:
-            return self._mock_esg_prediction()
-        
-        try:
-            prompt = f"""
-            As an ESG expert, analyze this company data and predict ESG scores:
-            
-            Company Data:
-            {json.dumps(client_data, indent=2)}
-            
-            Provide your response as a JSON object with the following structure:
-            1. currentScore: Overall ESG score (0-100)
-            2. pillarScores: Object with environmental, social, governance scores
-            3. predictedScores: List of 6 months predictions with confidence
-            4. trend: "improving", "stable", or "declining"
-            5. confidence: Confidence score (0-1)
-            6. keyDrivers: List of key drivers
-            7. riskFactors: List of risk factors
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Gemini ESG prediction error: {str(e)}")
-            return self._mock_esg_prediction()
-    
-    async def assess_esg_risks(self, portfolio_data: Dict) -> Dict:
-        """Assess ESG risks using Gemini AI"""
-        if self.mock_mode:
-            return self._mock_risk_assessment()
-        
-        try:
-            prompt = f"""
-            As an ESG risk analyst, assess risks for this portfolio:
-            
-            Portfolio Data:
-            {json.dumps(portfolio_data, indent=2)}
-            
-            Provide your response as a JSON object with:
-            1. overallRiskScore: Overall risk score (0-100)
-            2. riskCategories: Object with environmental, social, governance risk scores and levels
-            3. topRisks: List of top 3 risks with type, probability, impact, and mitigation
-            4. recommendations: List of mitigation strategies
-            5. riskLevel: "low", "medium", or "high"
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Gemini risk assessment error: {str(e)}")
-            return self._mock_risk_assessment()
-    
-    async def forecast_carbon_emissions(self, historical_data: Dict) -> Dict:
-        """Forecast carbon emissions using Gemini AI"""
-        if self.mock_mode:
-            return self._mock_carbon_forecast()
-        
-        try:
-            prompt = f"""
-            As a carbon emissions expert, forecast emissions based on historical data:
-            
-            Historical Data:
-            {json.dumps(historical_data, indent=2)}
-            
-            Provide your response as a JSON object with:
-            1. currentEmissions: Current emissions baseline
-            2. forecastData: List of 6 months predictions with confidence
-            3. reductionPotential: Percentage reduction potential
-            4. keyDrivers: List of key drivers affecting emissions
-            5. optimizationOpportunities: List of optimization opportunities
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Gemini carbon forecast error: {str(e)}")
-            return self._mock_carbon_forecast()
+            logger.warning(f"Gemini init failed -> fallback mode: {type(e).__name__}: {e}")
 
-    async def analyze_energy_trends(self, energy_data: List[Dict], live_data: Optional[Dict] = None) -> Dict:
-        """Analyze energy trends — delegate to GeminiAnalyticsService when available, otherwise use a local fallback."""
-        try:
-            # Prefer the analytics implementation if present
-            try:
-                from app.services.gemini_analytics import GeminiAnalyticsService
-                analytics = GeminiAnalyticsService()
-                return await analytics.analyze_energy_trends(energy_data, live_data)
-            except Exception:
-                # Fallback to a compact local analysis if analytics service isn't available
-                total = sum(d.get('energy', 0) for d in energy_data) if energy_data else 0
-                avg = total / len(energy_data) if energy_data else 0
-                recent = energy_data[-7:] if len(energy_data) >= 7 else energy_data
-                recent_avg = sum(d.get('energy', 0) for d in recent) / len(recent) if recent else 0
-                trend = 'stable'
-                if recent_avg > avg * 1.1:
-                    trend = 'increasing'
-                elif recent_avg < avg * 0.9:
-                    trend = 'decreasing'
-
-                return {
-                    'summary': f'Energy consumption appears {trend} (avg {avg:.0f} kWh).',
-                    'trends': [f'7-day avg: {recent_avg:.0f} kWh', f'overall avg: {avg:.0f} kWh'],
-                    'anomalies': [],
-                    'recommendations': ['Investigate peak usage', 'Consider efficiency measures'],
-                    'efficiency_score': max(0, 100 - (avg / 50)),
-                    'cost_savings_potential': f'R {avg * 0.1:.0f}/month',
-                    'carbon_reduction_potential': f'{max(5, 100 - avg / 20)}%'
-                }
-        except Exception as e:
-            logger.exception('analyze_energy_trends failed')
-            return {'error': 'energy trend analysis failed', 'details': str(e)}
-
-    async def generate_recommendations(self, company_profile: Dict) -> Dict:
-        """Generate sustainability recommendations using Gemini AI"""
-        if self.mock_mode:
-            return self._mock_recommendations()
-        
-        try:
-            prompt = f"""
-            As a sustainability consultant, generate recommendations for this company:
-            
-            Company Profile:
-            {json.dumps(company_profile, indent=2)}
-            
-            Provide your response as a JSON object with:
-            1. recommendations: List of 9 recommendations (3 high, 3 medium, 3 low priority)
-            2. totalPotentialSavings: Total annual savings
-            3. implementationRoadmap: List of phases with duration and items
-            4. esgImpact: Overall ESG impact score
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Gemini recommendations error: {str(e)}")
-            return self._mock_recommendations()
-    
-    async def analyze_document(self, file_content: str, filename: str) -> Dict:
-        """Analyze ESG document using Gemini AI"""
-        if self.mock_mode:
-            return self._mock_document_analysis()
-        
-        try:
-            prompt = f"""
-            As an ESG document analyst, analyze this document:
-            
-            Filename: {filename}
-            Content: {file_content[:10000]}  # First 10K chars
-            
-            Provide your response as a JSON object with:
-            1. summary: Brief summary
-            2. esgMetrics: Object with environmental, social, governance scores
-            3. keyInsights: List of key insights
-            4. complianceStatus: Object with overall status, gaps, recommendations
-            5. extractedData: Object with emissions, energy, water data
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Gemini document analysis error: {str(e)}")
-            return self._mock_document_analysis()
-    
-    async def generate_ai_report(self, company_data: Dict, report_type: str = "comprehensive") -> Dict:
-        """Generate comprehensive AI ESG report using Gemini"""
-        if self.mock_mode:
-            return self._mock_ai_report()
-        
-        try:
-            prompt = f"""
-            As an ESG reporting expert, generate a {report_type} report:
-            
-            Company Data:
-            {json.dumps(company_data, indent=2)}
-            
-            Provide your response as a JSON object with:
-            1. executiveSummary: Object with overallESGScore, trend, achievements, improvementAreas
-            2. detailedAnalysis: Object with environmental, social, governance analysis
-            3. predictions: Object with next quarter/year scores, confidence, keyDrivers
-            4. actionPlan: Object with immediate, shortTerm, longTerm actions
-            5. reportId: Unique report ID
-            6. generatedAt: Timestamp
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Gemini report generation error: {str(e)}")
-            return self._mock_ai_report()
-    
-    async def chat(self, prompt: str) -> Dict:
-        """General chat with Gemini AI for ESG questions"""
-        if self.mock_mode:
-            return self._mock_chat_response(prompt)
-        
-        try:
-            response = self.model.generate_content(prompt)
-            return {
-                "answer": response.text,
-                "model": self.model_name,
-                "timestamp": datetime.now().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"Gemini chat error: {str(e)}")
-            return self._mock_chat_response(prompt)
-    
-    def _parse_gemini_response(self, response) -> Dict:
-        """Parse Gemini response to ensure JSON format"""
-        try:
-            # Extract text from response
-            response_text = response.text
-            
-            # Try to extract JSON from response
-            import re
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group()
-                # Clean up any common formatting issues
-                json_str = json_str.replace('\n', ' ').replace('\r', '')
-                return json.loads(json_str)
-            else:
-                # If no JSON found, wrap in structured response
-                return {
-                    "analysis": response_text,
-                    "model": self.model_name,
-                    "timestamp": datetime.now().isoformat()
-                }
-        except json.JSONDecodeError as e:
-            logger.warning(f"Could not parse Gemini response as JSON: {str(e)}")
-            return {
-                "analysis": response.text if hasattr(response, 'text') else str(response),
-                "model": self.model_name,
-                "timestamp": datetime.now().isoformat(),
-                "note": "Response not in JSON format"
-            }
-        except Exception as e:
-            logger.error(f"Error parsing Gemini response: {str(e)}")
-            return {
-                "error": "Failed to parse response",
-                "raw_response": str(response.text) if hasattr(response, 'text') else str(response),
-                "model": self.model_name
-            }
-    
-    # Enhanced mock responses
-    def _mock_esg_prediction(self) -> Dict:
-        return {
-            "currentScore": 78,
-            "pillarScores": {
-                "environmental": 82,
-                "social": 76,
-                "governance": 74
-            },
-            "predictedScores": [
-                {"month": "Jan", "score": 78.5, "confidence": 0.92},
-                {"month": "Feb", "score": 79.2, "confidence": 0.89},
-                {"month": "Mar", "score": 80.1, "confidence": 0.86},
-                {"month": "Apr", "score": 80.8, "confidence": 0.83},
-                {"month": "May", "score": 81.5, "confidence": 0.80},
-                {"month": "Jun", "score": 82.3, "confidence": 0.77}
-            ],
-            "trend": "improving",
-            "confidence": 0.85,
-            "keyDrivers": [
-                "Energy efficiency improvements (15% reduction in consumption)",
-                "Renewable energy adoption (35% renewable mix)",
-                "Waste reduction initiatives (40% recycling rate)"
-            ],
-            "riskFactors": [
-                {"factor": "Regulatory changes", "impact": "medium", "probability": 0.35},
-                {"factor": "Supply chain emissions", "impact": "high", "probability": 0.45},
-                {"factor": "Climate impact", "impact": "medium", "probability": 0.30}
-            ],
-            "model": "gemini-pro-mock"
-        }
-    
-    def _mock_risk_assessment(self) -> Dict:
-        return {
-            "overallRiskScore": 42.5,
-            "riskCategories": {
-                "environmental": {"score": 35, "level": "low", "trend": "improving"},
-                "social": {"score": 48, "level": "medium", "trend": "stable"},
-                "governance": {"score": 44, "level": "medium", "trend": "improving"}
-            },
-            "topRisks": [
-                {
-                    "type": "Regulatory Compliance",
-                    "probability": 0.35,
-                    "impact": "high",
-                    "mitigation": "Enhanced monitoring and reporting systems",
-                    "timeline": "3-6 months"
-                },
-                {
-                    "type": "Climate Risk",
-                    "probability": 0.45,
-                    "impact": "medium",
-                    "mitigation": "Climate adaptation strategies and carbon offset programs",
-                    "timeline": "6-12 months"
-                },
-                {
-                    "type": "Supply Chain ESG",
-                    "probability": 0.25,
-                    "impact": "medium",
-                    "mitigation": "Supplier engagement programs and ESG requirements",
-                    "timeline": "12-18 months"
-                }
-            ],
-            "recommendations": [
-                "Implement enhanced compliance monitoring system",
-                "Develop comprehensive climate adaptation plan",
-                "Strengthen supplier ESG requirements and audits",
-                "Establish regular ESG risk assessment cycles"
-            ],
-            "riskLevel": "medium",
-            "model": "gemini-pro-mock"
-        }
-    
-    def _mock_carbon_forecast(self) -> Dict:
-        return {
-            "currentEmissions": 1250.5,
-            "units": "metric tons CO2e",
-            "forecastData": [
-                {"month": "Jan", "predicted": 1280.2, "confidence": 0.90, "trend": "up"},
-                {"month": "Feb", "predicted": 1265.8, "confidence": 0.88, "trend": "down"},
-                {"month": "Mar", "predicted": 1245.3, "confidence": 0.86, "trend": "down"},
-                {"month": "Apr", "predicted": 1230.7, "confidence": 0.84, "trend": "down"},
-                {"month": "May", "predicted": 1218.9, "confidence": 0.82, "trend": "down"},
-                {"month": "Jun", "predicted": 1205.4, "confidence": 0.80, "trend": "down"}
-            ],
-            "reductionPotential": 18.5,
-            "keyDrivers": [
-                "Energy consumption trends (seasonal variations)",
-                "Production volume changes",
-                "Renewable energy integration progress",
-                "Operational efficiency improvements"
-            ],
-            "optimizationOpportunities": [
-                {"opportunity": "Solar panel installation", "savings": 120, "roi": 3.2},
-                {"opportunity": "Energy efficiency upgrades", "savings": 85, "roi": 2.8},
-                {"opportunity": "Process optimization", "savings": 65, "roi": 4.1},
-                {"opportunity": "Transportation electrification", "savings": 45, "roi": 5.5}
-            ],
-            "model": "gemini-pro-mock"
-        }
-    
-    def _mock_recommendations(self) -> Dict:
-        return {
-            "recommendations": [
-                {
-                    "category": "Energy",
-                    "priority": "high",
-                    "title": "Install Solar Panels",
-                    "description": "Install rooftop solar panels to reduce grid dependency and lower emissions",
-                    "estimatedSavings": "$45,000/year",
-                    "implementationTime": "3-6 months",
-                    "esgImpact": {"environmental": 8, "social": 3, "governance": 2},
-                    "roi": 185,
-                    "carbonReduction": 120
-                },
-                {
-                    "category": "Emissions",
-                    "priority": "high",
-                    "title": "Implement Carbon Tracking System",
-                    "description": "Real-time carbon emissions monitoring and reporting system",
-                    "estimatedSavings": "$28,000/year",
-                    "implementationTime": "6-12 months",
-                    "esgImpact": {"environmental": 6, "social": 2, "governance": 5},
-                    "roi": 156,
-                    "carbonReduction": 85
-                },
-                {
-                    "category": "Water",
-                    "priority": "medium",
-                    "title": "Water Recycling System",
-                    "description": "Install water recycling and conservation system",
-                    "estimatedSavings": "$15,000/year",
-                    "implementationTime": "9-15 months",
-                    "esgImpact": {"environmental": 5, "social": 4, "governance": 1},
-                    "roi": 134,
-                    "carbonReduction": 30
-                }
-            ],
-            "totalPotentialSavings": "$88,000/year",
-            "totalCarbonReduction": 235,
-            "implementationRoadmap": [
-                {"phase": "Quick Wins", "duration": "0-3 months", "items": 3, "priority": "high"},
-                {"phase": "Strategic Projects", "duration": "3-12 months", "items": 4, "priority": "medium"},
-                {"phase": "Long-term Vision", "duration": "12-24 months", "items": 3, "priority": "low"}
-            ],
-            "esgImpact": {"environmental": 7.5, "social": 4.2, "governance": 3.8},
-            "model": "gemini-pro-mock"
-        }
-    
-    def _mock_document_analysis(self) -> Dict:
-        return {
-            "summary": "ESG sustainability report analyzed successfully. Strong performance in environmental initiatives with room for improvement in social metrics.",
-            "esgMetrics": {
-                "environmental": {"score": 76, "mentions": 15, "sentiment": "positive", "trend": "improving"},
-                "social": {"score": 82, "mentions": 12, "sentiment": "positive", "trend": "stable"},
-                "governance": {"score": 79, "mentions": 18, "sentiment": "neutral", "trend": "improving"}
-            },
-            "keyInsights": [
-                "Strong commitment to renewable energy initiatives (40% renewable mix)",
-                "Comprehensive sustainability reporting framework aligned with GRI standards",
-                "Room for improvement in social impact measurement and diversity metrics",
-                "Good governance practices with transparent reporting and board oversight",
-                "Significant progress in waste reduction and circular economy initiatives"
-            ],
-            "complianceStatus": {
-                "overall": "compliant",
-                "frameworks": ["GRI", "SASB", "TCFD"],
-                "gaps": [
-                    "Enhanced disclosure required for Scope 3 emissions",
-                    "Third-party verification needed for environmental claims",
-                    "More detailed diversity and inclusion metrics required"
-                ],
-                "recommendations": [
-                    "Add more detailed ESG metrics and KPIs in next report",
-                    "Enhance climate risk disclosure and scenario analysis",
-                    "Include supplier ESG performance data"
-                ]
-            },
-            "extractedData": {
-                "emissions": {"scope1": 450, "scope2": 320, "scope3": 180, "units": "metric tons CO2e"},
-                "energy": {"renewable": 65, "total": 100, "units": "MWh", "renewablePercentage": 65},
-                "water": {"consumption": 5500, "recycled": 1200, "units": "cubic meters", "recyclingRate": 22},
-                "waste": {"total": 120, "recycled": 85, "units": "tons", "recyclingRate": 71}
-            },
-            "model": "gemini-pro-mock"
-        }
-    
-    def _mock_ai_report(self) -> Dict:
-        current_time = datetime.now()
-        return {
-            "reportId": f"GEMINI-REPORT-{current_time.strftime('%Y%m%d-%H%M%S')}",
-            "generatedAt": current_time.isoformat(),
-            "executiveSummary": {
-                "overallESGScore": 79,
-                "trend": "improving",
-                "keyAchievements": [
-                    "22% reduction in carbon emissions year-over-year",
-                    "35% increase in renewable energy usage",
-                    "Enhanced governance framework with independent board oversight",
-                    "40% waste diversion rate achieved"
-                ],
-                "areasForImprovement": [
-                    "Supply chain transparency and ESG requirements",
-                    "Social impact measurement and reporting",
-                    "Climate risk assessment and adaptation planning",
-                    "Diversity and inclusion metrics"
-                ],
-                "timePeriod": f"Q1 {current_time.year}",
-                "comparisonPeriod": f"Q1 {current_time.year - 1}"
-            },
-            "detailedAnalysis": {
-                "environmental": {
-                    "score": 76,
-                    "strengths": [
-                        "Energy efficiency initiatives showing 15% reduction",
-                        "Strong renewable energy adoption strategy",
-                        "Effective waste management and recycling programs"
-                    ],
-                    "weaknesses": [
-                        "Water management needs improvement",
-                        "Scope 3 emissions reporting incomplete",
-                        "Limited biodiversity initiatives"
-                    ],
-                    "recommendations": [
-                        "Implement water recycling systems",
-                        "Enhance waste sorting and circular economy initiatives",
-                        "Develop biodiversity action plan"
-                    ],
-                    "metrics": {
-                        "carbonIntensity": 45.2,
-                        "energyEfficiency": 0.85,
-                        "waterUsage": 5500,
-                        "wasteRecycling": 71
-                    }
-                },
-                "social": {
-                    "score": 82,
-                    "strengths": [
-                        "Excellent employee safety record",
-                        "Strong community engagement programs",
-                        "Comprehensive employee wellness initiatives"
-                    ],
-                    "weaknesses": [
-                        "Limited diversity metrics and targets",
-                        "Supply chain labor practices need monitoring",
-                        "Social impact measurement could be more comprehensive"
-                    ],
-                    "recommendations": [
-                        "Enhance diversity programs with measurable targets",
-                        "Improve labor monitoring in supply chain",
-                        "Develop comprehensive social impact measurement framework"
-                    ],
-                    "metrics": {
-                        "employeeSatisfaction": 88,
-                        "safetyIncidents": 2,
-                        "communityInvestment": 150000,
-                        "trainingHours": 40
-                    }
-                },
-                "governance": {
-                    "score": 79,
-                    "strengths": [
-                        "Strong board oversight and independence",
-                        "Comprehensive ethics policies and training",
-                        "Transparent financial reporting"
-                    ],
-                    "weaknesses": [
-                        "Stakeholder communication could be enhanced",
-                        "ESG risk integration needs improvement",
-                        "Executive compensation ESG linkage weak"
-                    ],
-                    "recommendations": [
-                        "Enhance stakeholder communication channels",
-                        "Improve ESG risk integration in decision-making",
-                        "Strengthen executive compensation ESG linkage"
-                    ],
-                    "metrics": {
-                        "boardDiversity": 35,
-                        "esgTraining": 95,
-                        "whistleblowerCases": 0,
-                        "policyCompliance": 98
-                    }
-                }
-            },
-            "predictions": {
-                "nextQuarterScore": 81,
-                "nextYearScore": 85,
-                "confidence": 0.87,
-                "keyDrivers": [
-                    "Continued energy efficiency improvements",
-                    "Renewable energy expansion projects",
-                    "Enhanced ESG data collection and reporting",
-                    "Supply chain ESG integration"
-                ],
-                "risks": [
-                    {"risk": "Regulatory changes", "impact": "medium", "probability": 0.35},
-                    {"risk": "Climate events", "impact": "high", "probability": 0.25},
-                    {"risk": "Market volatility", "impact": "medium", "probability": 0.40}
-                ]
-            },
-            "actionPlan": {
-                "immediate": [
-                    "Conduct comprehensive energy audit",
-                    "Review and update compliance requirements",
-                    "Enhance ESG data collection systems",
-                    "Launch stakeholder engagement initiative"
-                ],
-                "shortTerm": [
-                    "Implement solar panel project phase 1",
-                    "Develop comprehensive reporting framework",
-                    "Launch supply chain ESG assessment",
-                    "Establish ESG training program"
-                ],
-                "longTerm": [
-                    "Achieve carbon neutrality target",
-                    "Develop 5-year sustainability strategy",
-                    "Implement circular economy initiatives",
-                    "Establish industry leadership in ESG"
-                ]
-            },
-            "model": "gemini-pro-mock",
-            "version": "2.0"
-        }
-    
-    def _mock_chat_response(self, prompt: str) -> Dict:
-        """Generate mock chat response based on prompt"""
-        prompt_lower = prompt.lower()
-        
-        if 'report' in prompt_lower:
-            response_text = "I can help you generate comprehensive ESG reports. Based on your organization's data, I recommend starting with a sustainability performance report that includes environmental impact analysis, social responsibility metrics, and governance compliance assessment. Would you like me to begin the report generation process?"
-        elif 'recommend' in prompt_lower or 'improve' in prompt_lower:
-            response_text = "Based on ESG best practices and your current performance, I recommend: 1) Implementing energy efficiency measures (estimated savings: $45K/year), 2) Enhancing diversity and inclusion programs, 3) Strengthening supply chain ESG requirements, 4) Improving climate risk assessment. Which area would you like to explore in detail?"
-        elif 'score' in prompt_lower or 'rating' in prompt_lower:
-            response_text = "Your current ESG score is estimated at 7.8/10. Breakdown: Environmental: 8.2/10 (strong renewable energy performance), Social: 7.9/10 (good employee engagement), Governance: 7.3/10 (transparent reporting). Overall trend: Improving (+0.5 points this quarter)."
-        elif 'carbon' in prompt_lower or 'emission' in prompt_lower:
-            response_text = "Current carbon emissions: 1,250 metric tons CO2e. Reduction potential: 18.5%. Key opportunities: Solar installation (120t reduction), energy efficiency (85t), process optimization (65t). Estimated annual savings: $88,000."
-        elif 'invoice' in prompt_lower or 'purchase' in prompt_lower:
-            response_text = "I can analyze your invoices for ESG impact. For effective analysis, ensure invoices include: 1) Supplier ESG ratings, 2) Product/service carbon footprint data, 3) Sustainability certifications, 4) Environmental impact metrics. Upload your invoices and I'll categorize them by ESG impact."
-        else:
-            response_text = f"As your ESG AI assistant, I can help with: sustainability reporting, ESG scoring, carbon footprint analysis, risk assessment, recommendations, and document analysis. Regarding '{prompt[:50]}...', I suggest focusing on data-driven ESG initiatives aligned with industry best practices and regulatory requirements."
-        
-        return {
-            "answer": response_text,
-            "model": "gemini-pro-mock",
-            "timestamp": datetime.now().isoformat(),
-            "confidence": 0.85
-        }
-    
     def refresh_service(self):
-        """Force refresh the service with current environment variables"""
-        try:
-            api_key = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
-            
-            if api_key == "YOUR_GEMINI_API_KEY_HERE":
-                self.mock_mode = True
-                logger.warning("Gemini API key not configured. Staying in mock mode.")
-            else:
-                genai.configure(api_key=api_key)
-                model_name = getattr(settings, 'GEMINI_MODEL_ESG', 'gemini-1.5-flash')
-                self.model = genai.GenerativeModel(model_name)
-                self.model_name = model_name
-                self.mock_mode = False
-                logger.info(f"Gemini service refreshed with model: {model_name}")
-        except Exception as e:
-            logger.error(f"Failed to refresh Gemini service: {str(e)}")
-            self.mock_mode = True
+        """Reload env vars (useful after changing Render env)."""
+        self.api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        self.model_name = (os.getenv("GEMINI_MODEL") or "gemini-1.5-flash").strip()
+        self.enabled = bool(self.api_key)
+        self.mock_mode = not self.enabled
 
-    async def comprehensive_analysis(self, document_data: List[Dict], client_id: str, depth: str = "standard") -> Dict:
-        """Comprehensive ESG analysis using multiple documents"""
-        if self.mock_mode:
-            return self._mock_comprehensive_analysis(document_data, client_id, depth)
-        
-        try:
-            documents_text = "\n\n".join([
-                f"Document: {doc['filename']}\nContent: {doc['content']}"
-                for doc in document_data
-            ])
-            
-            prompt = f"""
-            Perform a comprehensive ESG analysis for client {client_id} using these documents:
-            
-            {documents_text}
-            
-            Analysis depth: {depth}
-            
-            Provide a comprehensive JSON response with:
-            1. overallScore: Overall ESG score (0-100)
-            2. pillarScores: Environmental, Social, Governance scores
-            3. keyFindings: List of key ESG findings
-            4. riskAreas: List of identified risk areas
-            5. opportunities: List of improvement opportunities
-            6. recommendations: Strategic recommendations
-            7. dataQuality: Assessment of data quality
-            8. complianceStatus: Regulatory compliance status
-            9. trendAnalysis: ESG performance trends
-            10. actionPlan: Prioritized action items
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Comprehensive analysis error: {str(e)}")
-            return self._mock_comprehensive_analysis(document_data, client_id, depth)
+        self._genai = None
+        self._model = None
 
-    async def real_time_insights(self, client_id: str = None) -> Dict:
-        """Generate real-time ESG insights"""
-        if self.mock_mode:
-            return self._mock_real_time_insights(client_id)
-        
-        try:
-            prompt = f"""
-            Generate real-time ESG insights for {client_id or 'current portfolio'}.
-            
-            Current date: {datetime.now().strftime('%Y-%m-%d')}
-            
-            Provide JSON with:
-            1. currentMetrics: Key ESG metrics
-            2. alerts: Active ESG alerts or warnings
-            3. opportunities: Immediate improvement opportunities
-            4. trends: Real-time trend indicators
-            5. recommendations: Actionable recommendations
-            6. marketContext: Market/regulatory context
-            7. peerComparison: How performance compares to peers
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Real-time insights error: {str(e)}")
-            return self._mock_real_time_insights(client_id)
+        if self.enabled:
+            self._init_client()
+        else:
+            logger.warning("Gemini refresh: GEMINI_API_KEY still missing -> mock_mode=True")
 
-    async def predictive_analytics(self, client_id: str, prediction_type: str, time_horizon: str) -> Dict:
-        """Predictive ESG analytics"""
-        if self.mock_mode:
-            return self._mock_predictive_analytics(client_id, prediction_type, time_horizon)
-        
-        try:
-            prompt = f"""
-            Perform predictive ESG analytics for client {client_id}.
-            
-            Prediction type: {prediction_type}
-            Time horizon: {time_horizon}
-            
-            Provide JSON with:
-            1. predictions: Main predictions with confidence scores
-            2. scenarios: Best/worst/most likely scenarios
-            3. keyDrivers: Factors driving predictions
-            4. riskFactors: Potential risk factors
-            5. opportunities: Predicted opportunities
-            6. recommendations: Proactive recommendations
-            7. confidence: Overall confidence in predictions
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Predictive analytics error: {str(e)}")
-            return self._mock_predictive_analytics(client_id, prediction_type, time_horizon)
+    # ---------------------------------------------------------------------
+    # Your existing analytics methods (kept, only small safety improvements)
+    # ---------------------------------------------------------------------
 
-    async def benchmark_analysis(self, client_id: str, industry: str, peer_group: str) -> Dict:
-        """Benchmark ESG performance against peers"""
-        if self.mock_mode:
-            return self._mock_benchmark_analysis(client_id, industry, peer_group)
-        
+    async def analyze_energy_trends(self, energy_data: List[Dict], live_data: Optional[Dict] = None) -> Dict[str, Any]:
         try:
-            prompt = f"""
-            Benchmark ESG performance for client {client_id} against {peer_group} in {industry} industry.
-            
-            Provide JSON with:
-            1. clientScore: Client's ESG scores
-            2. peerAverage: Peer group averages
-            3. ranking: Client's ranking within peer group
-            4. strengths: Areas where client outperforms peers
-            5. gaps: Areas where client lags peers
-            6. leaders: Top performers and their practices
-            7. recommendations: Recommendations to improve ranking
-            8. industryTrends: Industry ESG trends
-            """
-            
-            response = self.model.generate_content(prompt)
-            return self._parse_gemini_response(response)
-            
-        except Exception as e:
-            logger.error(f"Benchmark analysis error: {str(e)}")
-            return self._mock_benchmark_analysis(client_id, industry, peer_group)
+            if not energy_data:
+                return self._get_fallback_insights("energy")
 
-    def _mock_comprehensive_analysis(self, document_data: List[Dict], client_id: str, depth: str) -> Dict:
-        """Mock comprehensive analysis"""
-        return {
-            "client_id": client_id,
-            "analysis_depth": depth,
-            "overallScore": 78.5,
-            "pillarScores": {
-                "environmental": 82.0,
-                "social": 76.5,
-                "governance": 77.0
+            total_energy = sum(float(d.get("energy", 0) or 0) for d in energy_data)
+            avg_energy = total_energy / len(energy_data) if energy_data else 0
+
+            recent_data = energy_data[-7:] if len(energy_data) >= 7 else energy_data
+            recent_avg = sum(float(d.get("energy", 0) or 0) for d in recent_data) / len(recent_data) if recent_data else 0
+
+            trend = "stable"
+            if recent_avg > avg_energy * 1.1:
+                trend = "increasing"
+            elif recent_avg < avg_energy * 0.9:
+                trend = "decreasing"
+
+            values = [float(d.get("energy", 0) or 0) for d in energy_data]
+            peak = max(values) if values else 0
+            minimum = min(values) if values else 0
+
+            insights = {
+                "summary": f"Bertha House shows {trend} energy consumption with average usage of {avg_energy:.0f} kWh",
+                "trends": [
+                    f"7-day average: {recent_avg:.0f} kWh ({trend})",
+                    f"Peak usage: {peak:.0f} kWh",
+                    f"Minimum usage: {minimum:.0f} kWh",
+                ],
+                "anomalies": self._detect_anomalies(energy_data),
+                "recommendations": self._generate_recommendations(avg_energy, trend),
+                "opportunities": ["Solar panel installation", "LED lighting upgrade", "HVAC optimization"],
+                "risks": ["Equipment aging", "Seasonal variations"],
+                "efficiency_score": max(0, 100 - (avg_energy / 50)),  # Simple scoring
+                "cost_savings_potential": f"R {avg_energy * 0.1:.0f}/month",
+                "carbon_reduction_potential": f"{max(5, 100 - avg_energy / 20)}%",
+            }
+
+            logger.info(f"Generated energy analytics for {len(energy_data)} data points")
+            return insights
+
+        except Exception as e:
+            logger.error(f"Error generating energy analytics: {str(e)}")
+            return self._get_fallback_insights("energy")
+
+    async def analyze_carbon_footprint(self, energy_data: List[Dict], carbon_factor: float = 0.95) -> Dict[str, Any]:
+        try:
+            if not energy_data:
+                return self._get_fallback_insights("carbon")
+
+            total_energy = sum(float(d.get("energy", 0) or 0) for d in energy_data)
+            total_carbon = total_energy * float(carbon_factor) / 1000  # tCO2e
+
+            analysis = {
+                "total_carbon_tco2e": f"{total_carbon:.2f}",
+                "carbon_intensity": f"{total_carbon / 1000:.3f} tCO₂e/m²",  # assuming 1000m²
+                "monthly_trend": "stable",
+                "reduction_strategies": [
+                    "Renewable energy procurement",
+                    "Energy efficiency upgrades",
+                    "Behavioral change programs",
+                ],
+                "renewable_opportunities": ["Rooftop solar", "Green energy tariffs"],
+                "offset_recommendations": ["Local reforestation", "Carbon credit purchase"],
+                "compliance_status": "on_track" if total_carbon < 100 else "at_risk",
+                "target_achievement": f"{max(0, 100 - total_carbon)}%",
+            }
+
+            logger.info("Generated carbon footprint analytics")
+            return analysis
+
+        except Exception as e:
+            logger.error(f"Error generating carbon analytics: {str(e)}")
+            return self._get_fallback_insights("carbon")
+
+    async def generate_esg_report(self, energy_data: List[Dict], carbon_data: Dict, water_data: List[Dict]) -> Dict[str, Any]:
+        try:
+            report = {
+                "executive_summary": "Bertha House demonstrates moderate ESG performance with opportunities for improvement in energy efficiency and carbon reduction.",
+                "key_achievements": [
+                    "Consistent energy monitoring",
+                    "Carbon footprint tracking established",
+                    "ESG reporting framework implemented",
+                ],
+                "environmental_metrics": {
+                    "energy_efficiency": "Good",
+                    "carbon_management": "Improving",
+                    "water_conservation": "Adequate",
+                },
+                "social_impact": {
+                    "employee_engagement": "High",
+                    "community_initiatives": ["Local sustainability programs", "Educational outreach"],
+                },
+                "governance_compliance": {
+                    "reporting_status": "Compliant",
+                    "audit_readiness": "Ready",
+                },
+                "forward_looking": "Focus on renewable energy integration and efficiency improvements to enhance ESG performance.",
+                "recommendations": [
+                    "Implement solar energy solution",
+                    "Enhance energy monitoring systems",
+                    "Develop comprehensive sustainability strategy",
+                ],
+            }
+
+            logger.info("Generated ESG report")
+            return report
+
+        except Exception as e:
+            logger.error(f"Error generating ESG report: {str(e)}")
+            return self._get_fallback_insights("report")
+
+    def _detect_anomalies(self, energy_data: List[Dict]) -> List[str]:
+        if not energy_data:
+            return []
+
+        values = [float(d.get("energy", 0) or 0) for d in energy_data]
+        avg = sum(values) / len(values) if values else 0
+        threshold = avg * 1.5 if avg else 0
+
+        anomalies = []
+        for i, data in enumerate(energy_data):
+            val = float(data.get("energy", 0) or 0)
+            if threshold and val > threshold:
+                anomalies.append(f"High consumption on day {i+1}: {val:.0f} kWh")
+
+        return anomalies[:3]
+
+    def _generate_recommendations(self, avg_energy: float, trend: str) -> List[str]:
+        recommendations = []
+
+        if avg_energy > 3000:
+            recommendations.append("Consider energy audit to identify inefficiencies")
+
+        if trend == "increasing":
+            recommendations.append("Investigate causes of rising energy consumption")
+            recommendations.append("Implement energy-saving measures")
+
+        recommendations.append("Monitor peak usage patterns")
+        recommendations.append("Consider renewable energy options")
+
+        return recommendations[:3]
+
+    def _get_fallback_insights(self, analysis_type: str) -> Dict[str, Any]:
+        fallbacks = {
+            "energy": {
+                "summary": "Energy performance analysis based on available data",
+                "trends": ["Data collection in progress"],
+                "anomalies": ["Monitoring for patterns"],
+                "recommendations": ["Install comprehensive monitoring", "Establish baseline metrics"],
+                "opportunities": ["Energy efficiency assessment"],
+                "risks": ["Limited visibility on consumption patterns"],
+                "efficiency_score": 75,
+                "cost_savings_potential": "R 1,500/month",
+                "carbon_reduction_potential": "10%",
             },
-            "keyFindings": [
-                "Strong renewable energy adoption detected",
-                "Good employee diversity metrics",
-                "Need improvement in supply chain transparency"
-            ],
-            "riskAreas": [
-                "Climate change exposure",
-                "Regulatory compliance gaps",
-                "Supply chain sustainability"
-            ],
-            "opportunities": [
-                "Solar panel installation",
-                "Employee training programs",
-                "Sustainable sourcing initiatives"
-            ],
-            "recommendations": [
-                "Implement carbon accounting system",
-                "Enhance ESG reporting framework",
-                "Develop supplier sustainability program"
-            ],
-            "dataQuality": "Good - sufficient data for analysis",
-            "complianceStatus": "85% compliant with major ESG standards",
-            "trendAnalysis": "Positive trend across all ESG pillars",
-            "actionPlan": [
-                {"priority": "High", "action": "Install solar panels", "timeline": "6 months"},
-                {"priority": "Medium", "action": "ESG training", "timeline": "3 months"},
-                {"priority": "Low", "action": "Supplier assessment", "timeline": "12 months"}
-            ],
-            "model": "gemini-pro-mock"
+            "carbon": {
+                "total_carbon_tco2e": "15.5",
+                "carbon_intensity": "0.015 tCO₂e/m²",
+                "monthly_trend": "stable",
+                "reduction_strategies": ["Energy efficiency", "Renewable energy"],
+                "renewable_opportunities": ["Solar assessment"],
+                "offset_recommendations": ["Local carbon projects"],
+                "compliance_status": "on_track",
+                "target_achievement": "85%",
+            },
+            "report": {
+                "executive_summary": "ESG reporting framework established with ongoing data collection and analysis.",
+                "key_achievements": ["Monitoring systems operational", "Baseline metrics established"],
+                "environmental_metrics": {
+                    "energy_efficiency": "Good",
+                    "carbon_management": "Developing",
+                    "water_conservation": "Adequate",
+                },
+                "social_impact": {
+                    "employee_engagement": "Program development",
+                    "community_initiatives": ["Planning phase"],
+                },
+                "governance_compliance": {
+                    "reporting_status": "Framework establishment",
+                    "audit_readiness": "Preparation phase",
+                },
+                "forward_looking": "Building comprehensive ESG monitoring and reporting capabilities.",
+                "recommendations": ["Enhance data collection", "Develop sustainability strategy"],
+            },
         }
+        return fallbacks.get(analysis_type, {"error": "Analysis type not recognized"})
 
-    def _mock_real_time_insights(self, client_id: str) -> Dict:
-        """Mock real-time insights"""
-        return {
-            "client_id": client_id,
-            "timestamp": datetime.now().isoformat(),
-            "currentMetrics": {
-                "carbonIntensity": "0.8 tCO2e/$M revenue",
-                "renewableEnergy": "35%",
-                "diversityIndex": 0.72,
-                "governanceScore": 7.8
-            },
-            "alerts": [
-                {"level": "warning", "message": "Energy consumption up 12% this month"},
-                {"level": "info", "message": "New ESG regulation effective next quarter"}
-            ],
-            "opportunities": [
-                "Energy efficiency upgrade could save $45K annually",
-                "Green financing available for renewable projects"
-            ],
-            "trends": {
-                "emissions": "Decreasing",
-                "renewable": "Increasing",
-                "diversity": "Stable"
-            },
-            "recommendations": [
-                "Review energy usage patterns",
-                "Prepare for new ESG reporting requirements"
-            ],
-            "marketContext": "Industry ESG standards tightening",
-            "peerComparison": "Performing above industry average"
-        }
+    # ---------------------------------------------------------------------
+    # Methods your gemini_ai router is calling (so Render won't crash)
+    # ---------------------------------------------------------------------
 
-    def _mock_predictive_analytics(self, client_id: str, prediction_type: str, time_horizon: str) -> Dict:
-        """Mock predictive analytics"""
-        return {
-            "client_id": client_id,
-            "prediction_type": prediction_type,
-            "time_horizon": time_horizon,
-            "predictions": [
-                {"metric": "ESG Score", "current": 78.5, "predicted": 82.3, "confidence": 0.85},
-                {"metric": "Carbon Emissions", "current": 1250, "predicted": 1080, "confidence": 0.78}
-            ],
-            "scenarios": {
-                "best_case": {"score": 85.0, "probability": 0.25},
-                "worst_case": {"score": 74.0, "probability": 0.15},
-                "most_likely": {"score": 82.3, "probability": 0.60}
-            },
-            "keyDrivers": ["Renewable energy adoption", "Efficiency improvements", "Regulatory changes"],
-            "riskFactors": ["Climate events", "Policy changes", "Market volatility"],
-            "opportunities": ["Green incentives", "Technology upgrades", "Strategic partnerships"],
-            "recommendations": ["Accelerate renewable projects", "Enhance risk monitoring"],
-            "confidence": 0.82
-        }
+    async def predict_esg_scores(self, company_data: Dict[str, Any]) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {
+                "mode": "mock",
+                "prediction": {"environmental": 76, "social": 82, "governance": 79, "overall": 79},
+                "notes": "GEMINI_API_KEY missing -> mock response",
+            }
+        return await self._ask_gemini_json(
+            "Predict ESG scores (E,S,G,overall) from this company profile. Return JSON only.",
+            company_data,
+        )
 
-    def _mock_benchmark_analysis(self, client_id: str, industry: str, peer_group: str) -> Dict:
-        """Mock benchmark analysis"""
-        return {
-            "client_id": client_id,
-            "industry": industry,
-            "peer_group": peer_group,
-            "clientScore": {"overall": 78.5, "environmental": 82.0, "social": 76.5, "governance": 77.0},
-            "peerAverage": {"overall": 72.3, "environmental": 75.8, "social": 71.2, "governance": 70.0},
-            "ranking": {
-                "overall": "Top 25%",
-                "environmental": "Top 20%",
-                "social": "Top 30%",
-                "governance": "Top 35%"
-            },
-            "strengths": [
-                "Leading renewable energy adoption",
-                "Strong environmental performance",
-                "Good governance practices"
-            ],
-            "gaps": [
-                "Social initiatives lag behind peers",
-                "Supply chain transparency needs improvement",
-                "Community engagement below average"
-            ],
-            "leaders": [
-                {"company": "GreenCorp", "practice": "100% renewable energy"},
-                {"company": "SustainInc", "practice": "Comprehensive social programs"}
-            ],
-            "recommendations": [
-                "Enhance social responsibility programs",
-                "Improve supply chain ESG management",
-                "Increase community engagement initiatives"
-            ],
-            "industryTrends": [
-                "Increased focus on circular economy",
-                "Growing importance of human capital management",
-                "Rising ESG regulatory requirements"
-            ]
-        }
+    async def assess_esg_risks(self, portfolio_data: Dict[str, Any]) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {
+                "mode": "mock",
+                "risks": ["Carbon compliance risk", "Energy cost volatility", "Operational disruptions"],
+                "severity": "medium",
+            }
+        return await self._ask_gemini_json(
+            "Assess ESG risks for this portfolio. Return JSON with risks[], severity, mitigations[]. JSON only.",
+            portfolio_data,
+        )
 
-# Global Gemini service instance
-gemini_esg_service = GeminiESGService()
+    async def forecast_carbon_emissions(self, historical_data: Dict[str, Any]) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {
+                "mode": "mock",
+                "forecast_next_6_months": [1180, 1165, 1172, 1150, 1142, 1130],
+                "trend": "slight_decrease",
+            }
+        return await self._ask_gemini_json(
+            "Forecast carbon emissions for next 6 months. Return JSON only.",
+            historical_data,
+        )
 
-def get_gemini_esg_service():
-    """Get the global Gemini ESG service instance"""
-    return gemini_esg_service
+    async def generate_recommendations(self, company_profile: Dict[str, Any]) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {
+                "mode": "mock",
+                "recommendations": [
+                    "Improve HVAC scheduling",
+                    "Install LED lighting",
+                    "Increase renewable energy share",
+                ],
+            }
+        return await self._ask_gemini_json(
+            "Generate sustainability recommendations. Return JSON with recommendations[]. JSON only.",
+            company_profile,
+        )
+
+    async def analyze_document(self, text: str, filename: str) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {
+                "mode": "mock",
+                "filename": filename,
+                "summary": "Document analysis unavailable (no GEMINI_API_KEY).",
+                "key_findings": [],
+                "risks": [],
+                "recommendations": [],
+            }
+        payload = {"filename": filename, "text": text[:12000]}
+        return await self._ask_gemini_json(
+            "Analyze this ESG document and return JSON with summary, key_findings[], risks[], recommendations[]. JSON only.",
+            payload,
+        )
+
+    async def generate_ai_report(self, company_data: Dict[str, Any], report_type: str) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {
+                "mode": "mock",
+                "report_type": report_type,
+                "report": "AI report generation unavailable (no GEMINI_API_KEY).",
+            }
+        payload = {"report_type": report_type, "company_data": company_data}
+        return await self._ask_gemini_json(
+            "Generate an ESG report narrative. Return JSON with sections. JSON only.",
+            payload,
+        )
+
+    async def chat(self, prompt: str) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {"answer": "Mock chat: configure GEMINI_API_KEY to enable live responses.", "model": "mock"}
+        try:
+            resp_text = await self._ask_gemini_text(prompt)
+            return {"answer": resp_text, "model": self.model_name}
+        except Exception as e:
+            return {"answer": f"Gemini chat error: {type(e).__name__}: {e}", "model": "error"}
+
+    async def comprehensive_analysis(self, document_data: List[Dict[str, Any]], client_id: str, analysis_depth: str) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {"mode": "mock", "clientId": client_id, "analysis_depth": analysis_depth, "summary": "Mock comprehensive analysis"}
+        payload = {"clientId": client_id, "analysis_depth": analysis_depth, "documents": document_data}
+        return await self._ask_gemini_json(
+            "Perform comprehensive ESG analysis over provided documents. Return JSON only.",
+            payload,
+        )
+
+    async def real_time_insights(self, client_id: Optional[str] = None) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {"mode": "mock", "clientId": client_id, "insights": ["Mock real-time insights"]}
+        payload = {"clientId": client_id}
+        return await self._ask_gemini_json(
+            "Generate real-time ESG insights. Return JSON only.",
+            payload,
+        )
+
+    async def predictive_analytics(self, client_id: str, prediction_type: str, time_horizon: str) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {"mode": "mock", "clientId": client_id, "prediction_type": prediction_type, "time_horizon": time_horizon}
+        payload = {"clientId": client_id, "prediction_type": prediction_type, "time_horizon": time_horizon}
+        return await self._ask_gemini_json(
+            "Run predictive ESG analytics. Return JSON only.",
+            payload,
+        )
+
+    async def benchmark_analysis(self, client_id: str, industry: str, peer_group: str) -> Dict[str, Any]:
+        if self.mock_mode:
+            return {"mode": "mock", "clientId": client_id, "industry": industry, "peer_group": peer_group, "benchmark": "mock"}
+        payload = {"clientId": client_id, "industry": industry, "peer_group": peer_group}
+        return await self._ask_gemini_json(
+            "Benchmark ESG performance against peers. Return JSON only.",
+            payload,
+        )
+
+    # ---------------------------------------------------------------------
+    # Gemini helpers
+    # ---------------------------------------------------------------------
+
+    async def _ask_gemini_text(self, prompt: str) -> str:
+        if self.mock_mode or not self._model:
+            return "Gemini unavailable (mock_mode)."
+        resp = self._model.generate_content(prompt)
+        return getattr(resp, "text", None) or str(resp)
+
+    async def _ask_gemini_json(self, instruction: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        We request JSON-only, but still handle if Gemini returns text.
+        """
+        if self.mock_mode or not self._model:
+            return {"mode": "mock", "error": "Gemini unavailable", "payload": payload}
+
+        prompt = (
+            f"{instruction}\n\n"
+            f"Return STRICT JSON only.\n\n"
+            f"PAYLOAD:\n{payload}"
+        )
+        text = await self._ask_gemini_text(prompt)
+
+        # Best-effort JSON parse
+        try:
+            import json
+            return json.loads(text)
+        except Exception:
+            return {"mode": "live", "raw": text, "note": "Gemini did not return strict JSON"}
+
+
+# Global instance used by routers/imports
+gemini_esg_service = GeminiAnalyticsService()

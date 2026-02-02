@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     def get_cors_origins(self) -> list[str]:
         if not self.CORS_ORIGINS:
             return []
-        raw = self.CORS_ORIGINS.strip()
+        raw = (self.CORS_ORIGINS or "").strip()
         if not raw:
             return []
         if raw.startswith("["):
@@ -33,7 +33,7 @@ class Settings(BaseSettings):
                 return []
         return [x.strip().rstrip("/") for x in raw.split(",") if x.strip()]
 
-    # ✅ Mongo (matches Render key)
+    # Mongo (matches your Render key)
     MONGODB_URL: str | None = None
 
     def get_mongo_uri(self) -> str:
@@ -57,8 +57,9 @@ class Settings(BaseSettings):
     SUNSYNK_API_KEY: str | None = None
     SUNSYNK_API_SECRET: str | None = None
 
-    # Gemini (matches Render key)
+    # ✅ Gemini (matches Render env key)
     GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = Field(default="gemini-1.5-flash")
 
 
 settings = Settings()
