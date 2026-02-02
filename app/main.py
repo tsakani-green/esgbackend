@@ -1,5 +1,3 @@
-# backend/app/main.py
-
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -20,6 +18,10 @@ from .api import email as email_router
 from .services.egauge_poller import start_egauge_scheduler
 from .services.egauge_client import diagnose_egauge_connection
 
+# ✅ Gemini service (NEW import that matches your updated service)
+from .services.gemini_analytics_service import gemini_service
+
+# Configure logging
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -34,7 +36,9 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
 )
 
-
+# -------------------------------------------------------------------
+# Validation error handler (422)
+# -------------------------------------------------------------------
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     content_type = request.headers.get("content-type", "")
@@ -52,7 +56,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         },
     )
 
-
+# -------------------------------------------------------------------
+# Global exception handler
+# -------------------------------------------------------------------
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception(f"Unhandled exception on {request.method} {request.url}")
@@ -65,7 +71,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
             "error": str(exc) if settings.DEBUG else None,
         },
     )
-
 
 # -------------------------------------------------------------------
 # CORS middleware (REAL origins only — no regex)
@@ -90,9 +95,11 @@ def _build_cors_origins() -> list[str]:
         "https://esgfrontend-delta.vercel.app",
     ]
 
+    # Optional: add FRONTEND_URL if set
     if getattr(settings, "FRONTEND_URL", None):
         origins.append(settings.FRONTEND_URL.strip().rstrip("/"))
 
+    # Optional: merge in CORS_ORIGINS if set
     try:
         extra = settings.get_cors_origins()
         for o in extra:
@@ -122,7 +129,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # -------------------------------------------------------------------
 # Routers
 # -------------------------------------------------------------------
@@ -136,7 +142,7 @@ app.include_router(projects_router, prefix="/api/assets", tags=["assets"])
 app.include_router(meters_router, prefix="/api/meters", tags=["meters"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
-app.include_router(gemini_ai.router, tags=["Gemini AI"])  # /api/gemini/**
+app.include_router(gemini_ai.router, tags=["Gemini AI"])
 app.include_router(ai_agent.router, prefix="/api/ai", tags=["AI Agent"])
 app.include_router(recent_activities_router, tags=["recent-activities"])
 
@@ -203,16 +209,11 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"eGauge scheduler not started: {e}")
 
-    # ✅ This import will now work because services/gemini_esg.py includes get_gemini_esg_service()
+    # ✅ Gemini status log (NO get_gemini_esg_service import anymore)
     try:
-        from app.services.gemini_esg import get_gemini_esg_service
-        gemini = get_gemini_esg_service()
-        logger.info(
-            f"Gemini AI enabled: {not getattr(gemini, 'mock_mode', True)}; "
-            f"model={getattr(gemini, 'model_name', None)}"
-        )
+        logger.info(f"Gemini enabled: {gemini_service.enabled}")
     except Exception as e:
-        logger.warning(f"Unable to determine Gemini AI status: {e}")
+        logger.warning(f"Unable to determine Gemini status: {e}")
 
     if settings.DEBUG:
         await _run_startup_diagnostics()
@@ -242,7 +243,6 @@ async def root():
             "assets": "/api/assets",
             "health": "/health",
             "email": "/api/email",
-            "gemini": "/api/gemini",
         },
     }
 
