@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 import logging
 from datetime import datetime, timezone
 
@@ -29,6 +30,27 @@ app = FastAPI(
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None,
 )
+
+# -------------------------------------------------------------------
+# Validation error handler (422) — VERY useful for login debugging
+# -------------------------------------------------------------------
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # DO NOT log passwords — just metadata
+    content_type = request.headers.get("content-type", "")
+    logger.warning(
+        f"422 ValidationError on {request.method} {request.url.path} "
+        f"(content-type={content_type}) errors={exc.errors()}"
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": exc.errors(),
+            "path": str(request.url.path),
+            "method": request.method,
+            "content_type": content_type,
+        },
+    )
 
 # -------------------------------------------------------------------
 # Global exception handler (helps debug 500s cleanly)
@@ -92,7 +114,7 @@ def _build_cors_origins() -> list[str]:
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
-# Allow localhost/127.0.0.1 on ANY port in dev (covers 3004, etc.)
+# Allow localhost/127.0.0.1 on ANY port in dev
 cors_origin_regex = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 app.add_middleware(
