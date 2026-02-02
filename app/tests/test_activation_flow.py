@@ -1,0 +1,189 @@
+import asyncio
+import os
+import time
+from datetime import timedelta
+from jose import jwt
+import pytest
+from fastapi import HTTPException
+from bson import ObjectId
+
+from app.api import auth
+from app.core import config
+
+settings = config.settings
+
+
+class FakeCollection:
+    def __init__(self):
+        self._docs = {}
+
+    async def find_one(self, query):
+        # Support lookup by $or and by _id
+        if query is None:
+            return None
+        if isinstance(query, dict) and "$or" in query:
+            for c in query["$or"]:
+                for k, v in c.items():
+                    for doc in self._docs.values():
+                        if doc.get(k) == v:
+                            return doc
+            return None
+        if "_id" in query:
+            _id = query["_id"]
+            for doc in self._docs.values():
+                if doc.get("_id") == _id:
+                    return doc
+            return None
+        # generic equality
+        for doc in self._docs.values():
+            match = True
+            for k, v in query.items():
+                if doc.get(k) != v:
+                    match = False
+                    break
+            if match:
+                return doc
+        return None
+
+    async def insert_one(self, doc):
+        _id = ObjectId()
+        doc_copy = dict(doc)
+        doc_copy["_id"] = _id
+        self._docs[str(_id)] = doc_copy
+        class Result:
+            def __init__(self, inserted_id):
+                self.inserted_id = inserted_id
+        return Result(_id)
+
+    async def update_one(self, query, update):
+        # only support $set
+        doc = await self.find_one(query)
+        if not doc:
+            return
+        set_obj = update.get("$set", {})
+        doc.update(set_obj)
+        class Result:
+            def __init__(self, matched_count=1):
+                self.matched_count = matched_count
+        return Result()
+
+
+class FakeDB:
+    def __init__(self):
+        self.users = FakeCollection()
+        self.password_reset_tokens = FakeCollection()
+
+
+@pytest.mark.asyncio
+async def test_send_activation_email_writes_to_disk(tmp_path, monkeypatch):
+    # Ensure EMAIL_USERNAME is empty to trigger write-to-disk
+    monkeypatch.setattr(settings, "EMAIL_USERNAME", "")
+    tmp_upload_dir = tmp_path / "uploads"
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_upload_dir))
+
+    to_email = "foo@example.com"
+    user_name = "Foo"
+    activation_link = "http://localhost/activate?token=abc"
+
+    result = await auth.send_activation_email(to_email, user_name, activation_link)
+    assert result is True
+
+    # Check that file is created in uploads/sent_emails
+    sent_dir = tmp_upload_dir / "sent_emails"
+    files = list(sent_dir.glob("activation-*.html"))
+    assert len(files) >= 1
+
+
+@pytest.mark.asyncio
+async def test_activate_success(monkeypatch):
+    fake_db = FakeDB()
+
+    # insert a pending user
+    user_doc = {
+        "username": "alice",
+        "email": "alice@example.com",
+        "full_name": "Alice",
+        "hashed_password": "",
+        "role": "client",
+        "status": "pending",
+    }
+    res = await fake_db.users.insert_one(user_doc)
+
+    # create activation token for alice
+    token = auth.create_access_token({"sub": "alice", "role": "client"}, expires_delta=timedelta(days=7))
+
+    resp = await auth.activate({"token": token}, db=fake_db)
+    assert resp["success"] is True
+    assert resp["message"] == "Account activated successfully"
+
+    # verify that user status was updated
+    user = await fake_db.users.find_one({"_id": res.inserted_id})
+    assert user.get("status") == "active"
+
+
+@pytest.mark.asyncio
+async def test_activate_invalid_token_raises():
+    fake_db = FakeDB()
+    with pytest.raises(HTTPException) as ie:
+        await auth.activate({"token": "not-a-valid-token"}, db=fake_db)
+    assert ie.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_resend_activation_user_not_found():
+    fake_db = FakeDB()
+    from app.api.auth import ResendActivationRequest
+    req = ResendActivationRequest(email="noone@example.com")
+    with pytest.raises(HTTPException) as ie:
+        await auth.resend_activation(req, db=fake_db)
+    assert ie.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_resend_activation_success(monkeypatch):
+    fake_db = FakeDB()
+
+    user_doc = {
+        "username": "bob",
+        "email": "bob@example.com",
+        "full_name": "Bob",
+        "hashed_password": "",
+        "role": "client",
+        "status": "pending",
+    }
+    await fake_db.users.insert_one(user_doc)
+
+    # monkeypatch send_activation_email to avoid writing files
+    async def fake_send(to_email, name, link):
+        return True
+
+    monkeypatch.setattr(auth, "send_activation_email", fake_send)
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+
+    from app.api.auth import ResendActivationRequest
+    req = ResendActivationRequest(email="bob@example.com")
+    resp = await auth.resend_activation(req, db=fake_db)
+    assert resp.get("message") in ("Activation email sent", "Failed to send activation email")
+    assert "activation_link" in resp
+    assert resp.get("email_sent") is True
+
+
+@pytest.mark.asyncio
+async def test_get_current_user_rejects_pending_user(monkeypatch):
+    fake_db = FakeDB()
+
+    user_doc = {
+        "username": "charlie",
+        "email": "charlie@example.com",
+        "full_name": "Charlie",
+        "hashed_password": "",
+        "role": "client",
+        "status": "pending",
+    }
+    await fake_db.users.insert_one(user_doc)
+
+    token = auth.create_access_token({"sub": "charlie", "role": "client"}, expires_delta=timedelta(minutes=5))
+
+    with pytest.raises(HTTPException) as ie:
+        await auth.get_current_user(token=token, db=fake_db)
+    assert ie.value.status_code == 403
