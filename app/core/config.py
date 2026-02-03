@@ -13,7 +13,21 @@ class Settings(BaseSettings):
 
     # Auth / JWT
     SECRET_KEY: str = Field(default="change-me")
+
+    # ✅ Keep your existing hours setting
     ACCESS_TOKEN_EXPIRE_HOURS: int = Field(default=24)
+
+    # ✅ Add minutes too (so auth.py doesn't crash)
+    ACCESS_TOKEN_EXPIRE_MINUTES: int | None = None
+
+    # ✅ Computed helper (use this everywhere)
+    @property
+    def access_token_expire_minutes(self) -> int:
+        # If minutes explicitly set, use it
+        if isinstance(self.ACCESS_TOKEN_EXPIRE_MINUTES, int) and self.ACCESS_TOKEN_EXPIRE_MINUTES > 0:
+            return self.ACCESS_TOKEN_EXPIRE_MINUTES
+        # Otherwise derive from hours
+        return int(self.ACCESS_TOKEN_EXPIRE_HOURS) * 60
 
     # Frontend / CORS
     FRONTEND_URL: str | None = None
@@ -46,7 +60,20 @@ class Settings(BaseSettings):
     EGAUGE_USERNAME: str | None = None
     EGAUGE_PASSWORD: str | None = None
 
-    # SMTP
+    # ----------------------------------------------------------------
+    # ✅ Email (feature flag + compatibility fields)
+    # ----------------------------------------------------------------
+    EMAIL_ENABLED: bool = Field(default=False)
+
+    # These are here so any old code referencing settings.EMAIL_* won't crash.
+    EMAIL_HOST: str | None = None
+    EMAIL_PORT: int = 587
+    EMAIL_USERNAME: str | None = None
+    EMAIL_PASSWORD: str | None = None
+    EMAIL_FROM: str | None = None
+    EMAIL_FROM_NAME: str | None = None
+
+    # Also keep your SMTP names (some parts may use them)
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587
     SMTP_USER: str | None = None

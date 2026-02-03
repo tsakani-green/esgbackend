@@ -34,6 +34,12 @@ async def connect_to_mongo() -> AsyncIOMotorDatabase:
 
     mongo_url = getattr(settings, "MONGODB_URL", None)
     if not mongo_url:
+        # In development we allow the server to start without a real MongoDB
+        if getattr(settings, "DEBUG", False) or getattr(settings, "ENVIRONMENT", "") == "development":
+            logger.warning("MONGODB_URL is not set — starting without a real MongoDB in development mode. DB operations will raise if used.")
+            # Return the DB proxy which will raise clear runtime errors when used.
+            return db
+        # In non-dev environments treat this as fatal
         raise RuntimeError("MONGODB_URL is not set")
 
     db_name = _get_db_name_from_uri(mongo_url)
