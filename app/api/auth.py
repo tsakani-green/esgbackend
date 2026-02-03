@@ -14,7 +14,7 @@ import logging
 
 from app.core.config import settings
 from app.core.database import db
-from app.services.email_service import send_activation_email
+from app.services.email_service import send_activation_email  # kept for later re-enable
 
 try:
     from bson import ObjectId
@@ -164,20 +164,27 @@ async def signup(payload: SignupIn):
     ins = await db.users.insert_one(user_doc)
     user_id = str(ins.inserted_id)
 
-    token = make_activation_token(user_id=user_id, email=email)
-    activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
+    # token = make_activation_token(user_id=user_id, email=email)
+    # activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
 
-    # IMPORTANT: No fallback activation_link returned.
-    # If email sending fails, raise error so client sees it.
-    try:
-        send_activation_email(email, full_name, activation_link)
-    except Exception as e:
-        logger.exception(f"Failed to send activation email to {email}: {e}")
-        raise HTTPException(status_code=503, detail="Failed to send activation email. Please try again later.")
+    # ------------------------------------------------------------
+    # ✅ TEMP: Email sending disabled to verify deployment works
+    # ------------------------------------------------------------
+    # try:
+    #     send_activation_email(email, full_name, activation_link)
+    # except Exception as e:
+    #     logger.exception(f"Failed to send activation email to {email}: {e}")
+    #     raise HTTPException(status_code=503, detail="Failed to send activation email. Please try again later.")
+
+    # ✅ TEMP: auto-activate user so login works without email
+    await db.users.update_one(
+        {"_id": to_object_id(user_id)},
+        {"$set": {"is_active": True, "activated_at": now_utc()}},
+    )
 
     return {
         "success": True,
-        "message": "Account created. Please check your email to activate your account.",
+        "message": "Account created (email disabled). You can now log in.",
     }
 
 @router.post("/activate")
@@ -304,31 +311,37 @@ class ResendActivationRequest(BaseModel):
 async def resend_activation(payload: ResendActivationRequest):
     """
     Resend activation email for an existing user account.
+    TEMP: email sending disabled; we auto-activate instead.
     """
     email = payload.email.strip().lower()
-    
-    # Find user by email
+
     user = await db.users.find_one({"email": email})
     if not user:
-        # Don't reveal if email exists for security
         return {"message": "If an account exists with this email, an activation link has been sent."}
-    
-    # Check if already activated
+
     if user.get("is_active", False):
         return {"message": "This account is already activated. You can log in."}
-    
-    # Generate new activation token
-    user_id = str(user["_id"])
-    token = make_activation_token(user_id=user_id, email=email)
-    activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
-    
-    try:
-        # Send activation email
-        send_activation_email(email, user.get("full_name", ""), activation_link)
-        return {
-            "message": "Activation email sent. Please check your inbox.",
-            "activation_link": activation_link if settings.DEBUG else None  # Show link in dev mode
-        }
-    except Exception as e:
-        logger.exception(f"Failed to resend activation email to {email}: {e}")
-        raise HTTPException(status_code=503, detail="Failed to send activation email. Please try again later.")
+
+    # token = make_activation_token(user_id=str(user["_id"]), email=email)
+    # activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
+
+    # ------------------------------------------------------------
+    # ✅ TEMP: Email sending disabled
+    # ------------------------------------------------------------
+    # try:
+    #     send_activation_email(email, user.get("full_name", ""), activation_link)
+    #     return {
+    #         "message": "Activation email sent. Please check your inbox.",
+    #         "activation_link": activation_link if settings.DEBUG else None
+    #     }
+    # except Exception as e:
+    #     logger.exception(f"Failed to resend activation email to {email}: {e}")
+    #     raise HTTPException(status_code=503, detail="Failed to send activation email. Please try again later.")
+
+    # ✅ TEMP: auto-activate user so login works
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"is_active": True, "activated_at": now_utc()}},
+    )
+
+    return {"message": "Email disabled. Account activated — you can now log in."}
