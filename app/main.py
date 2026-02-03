@@ -130,18 +130,17 @@ logger.info(f"CORS origins configured: {cors_origins}")
 logger.info(f"FRONTEND_URL from settings: {getattr(settings, 'FRONTEND_URL', None)}")
 logger.info(f"CORS_ORIGINS from settings: {getattr(settings, 'CORS_ORIGINS', None)}")
 
-# Temporary: Allow all origins for debugging (remove in production)
-if settings.ENVIRONMENT == "production":
-    # For now, allow the specific Vercel frontend and all origins for debugging
-    cors_origins.append("*")
-    logger.warning("⚠️ TEMPORARY: Allowing all origins for CORS debugging")
+# AGGRESSIVE CORS: Allow all origins for debugging
+cors_origins = ["*"]
+logger.warning("🚨 AGGRESSIVE CORS: Allowing all origins (*) for debugging")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
+    allow_origins=["*"],  # Explicitly allow all origins
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # -------------------------------------------------------------------
@@ -252,11 +251,15 @@ async def root():
         "message": "ESG Dashboard API is running",
         "version": "1.0.0",
         "environment": settings.ENVIRONMENT,
+        "deployment_timestamp": "2025-02-03T02:20:00Z",  # Force deployment update
+        "cors_enabled": True,
+        "cors_origins": ["*"],  # Debug mode
         "docs": "/docs" if settings.DEBUG else None,
         "endpoints": {
             "meters": "/api/meters",
             "assets": "/api/assets",
             "health": "/health",
+            "cors-test": "/cors-test",
             "email": "/api/email",
         },
     }
@@ -293,3 +296,15 @@ async def cors_test():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "origin": "Request received successfully"
     }
+
+
+@app.options("/cors-test")
+async def cors_test_options():
+    """Handle OPTIONS preflight for CORS test"""
+    return {"status": "ok"}
+
+
+@app.options("/api/auth/login")
+async def login_options():
+    """Handle OPTIONS preflight for login"""
+    return {"status": "ok"}
