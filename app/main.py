@@ -127,6 +127,14 @@ def _build_cors_origins() -> list[str]:
 
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
+logger.info(f"FRONTEND_URL from settings: {getattr(settings, 'FRONTEND_URL', None)}")
+logger.info(f"CORS_ORIGINS from settings: {getattr(settings, 'CORS_ORIGINS', None)}")
+
+# Temporary: Allow all origins for debugging (remove in production)
+if settings.ENVIRONMENT == "production":
+    # For now, allow the specific Vercel frontend and all origins for debugging
+    cors_origins.append("*")
+    logger.warning("⚠️ TEMPORARY: Allowing all origins for CORS debugging")
 
 app.add_middleware(
     CORSMiddleware,
@@ -257,28 +265,31 @@ async def root():
 @app.get("/health")
 async def health_check():
     from app.services.egauge_poller import STATUS
+    from app.core.database import _db
 
-    egauge_health = "unknown"
-    if STATUS.get("bertha-house"):
-        egauge_health = STATUS["bertha-house"].get("health", "unknown")
-
-    db_status = "unknown"
-    try:
-        from app.core.database import db
-        await db.command("ping")
-        db_status = "healthy"
-    except Exception as e:
-        db_status = f"error: {str(e)}"
-        logger.error(f"Database health check failed: {e}")
+    db_status = "connected" if _db is not None else "disconnected"
+    egauge_health = STATUS
 
     return {
         "status": "healthy",
         "version": "1.0.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cors_origins": cors_origins,
+        "environment": settings.ENVIRONMENT,
+        "frontend_url": getattr(settings, 'FRONTEND_URL', None),
         "services": {
             "database": db_status,
             "egauge": egauge_health,
             "scheduler": "running" if scheduler else "stopped",
         },
-        "environment": settings.ENVIRONMENT,
+    }
+
+
+@app.get("/cors-test")
+async def cors_test():
+    """Simple endpoint to test CORS headers"""
+    return {
+        "message": "CORS test successful",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "origin": "Request received successfully"
     }
