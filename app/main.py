@@ -1,44 +1,63 @@
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
+# backend/app/main.py
+
+from __future__ import annotations
+
 import logging
+import os
 from datetime import datetime, timezone
+from typing import List
 
-from .core.config import settings
-from .api import auth, invoices, files, analytics, reports, admin, sunsynk, gemini_ai, ai_agent
-from .api.recent_activities import router as recent_activities_router
-from .api.assets_sunsynk import router as assets_sunsynk_router
-from .api.assets import router as projects_router
-from .api.meters import router as meters_router
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 
-# ✅ Email router
-from .api import email as email_router
+from app.core.config import settings
 
-from .services.egauge_poller import start_egauge_scheduler
-from .services.egauge_client import diagnose_egauge_connection
+# ✅ Use YOUR db module functions
+from app.core.database import db, connect_to_mongo, close_mongo_connection
 
-# ✅ Gemini service (NEW import that matches your updated service)
-from .services.gemini_analytics_service import gemini_service
+# API routers (keep your existing imports)
+from app.api import (
+    admin,
+    ai_agent,
+    analytics,
+    auth,
+    files,
+    invoices,
+    reports,
+    sunsynk,
+    gemini_ai,
+)
+from app.api.recent_activities import router as recent_activities_router
+from app.api.assets_sunsynk import router as assets_sunsynk_router
+from app.api.assets import router as projects_router
+from app.api.meters import router as meters_router
 
-# Configure logging
+# ✅ Email router (if you have it)
+from app.api import email as email_router
+
+# Services (optional)
+from app.services.egauge_poller import start_egauge_scheduler
+
+logger = logging.getLogger(__name__)
+
 logging.basicConfig(
-    level=logging.DEBUG if settings.DEBUG else logging.INFO,
+    level=logging.DEBUG if getattr(settings, "DEBUG", False) else logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="ESG Dashboard API",
     version="1.0.0",
-    description="API for ESG Dashboard with eGauge integration",
-    docs_url="/docs" if settings.DEBUG else None,
-    redoc_url="/redoc" if settings.DEBUG else None,
+    description="API for ESG Dashboard",
+    docs_url="/docs" if getattr(settings, "DEBUG", False) else None,
+    redoc_url="/redoc" if getattr(settings, "DEBUG", False) else None,
 )
 
-# -------------------------------------------------------------------
-# Validation error handler (422)
-# -------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Error handlers
+# -----------------------------------------------------------------------------
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     content_type = request.headers.get("content-type", "")
@@ -56,9 +75,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         },
     )
 
-# -------------------------------------------------------------------
-# Global exception handler
-# -------------------------------------------------------------------
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception(f"Unhandled exception on {request.method} {request.url}")
@@ -68,84 +85,74 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
             "detail": "Internal server error",
             "path": str(request.url.path),
             "method": request.method,
-            "error": str(exc) if settings.DEBUG else None,
+            "error": str(exc) if getattr(settings, "DEBUG", False) else None,
         },
     )
 
-# -------------------------------------------------------------------
-# CORS middleware (REAL origins only — no regex)
-# -------------------------------------------------------------------
-def _build_cors_origins() -> list[str]:
+# -----------------------------------------------------------------------------
+# CORS
+# -----------------------------------------------------------------------------
+def _split_csv(value: str | None) -> List[str]:
+    if not value:
+        return []
+    return [v.strip().rstrip("/") for v in value.split(",") if v and v.strip()]
+
+def _build_cors_origins() -> List[str]:
     origins = [
-        # Local dev
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        "http://localhost:3002",
-        "http://127.0.0.1:3002",
-        "http://localhost:3004",
-        "http://127.0.0.1:3004",
-        "http://localhost:3008",
-        "http://127.0.0.1:3008",
-
-        # Production frontend (ALWAYS include)
         "https://esgfrontend-delta.vercel.app",
     ]
 
-    # Optional: add FRONTEND_URL if set
+    # FRONTEND_URL
     if getattr(settings, "FRONTEND_URL", None):
-        frontend_url = settings.FRONTEND_URL.strip().rstrip("/")
-        if frontend_url and frontend_url not in origins:
-            origins.append(frontend_url)
+        origins.append(str(settings.FRONTEND_URL).strip().rstrip("/"))
 
-    # Optional: merge in CORS_ORIGINS if set
+    # CORS_ORIGINS from settings (supports JSON list or CSV via your config.py)
     try:
-        extra = settings.get_cors_origins()
-        for o in extra:
-            o = (o or "").strip().rstrip("/")
-            if o and o not in origins:
-                origins.append(o)
+        env_origins = settings.get_cors_origins()
     except Exception as e:
         logger.warning(f"Failed to parse CORS_ORIGINS: {e}")
+        env_origins = _split_csv(os.getenv("CORS_ORIGINS"))
 
-    # Always include the Vercel frontend as fallback
-    vercel_frontend = "https://esgfrontend-delta.vercel.app"
-    if vercel_frontend not in origins:
-        origins.append(vercel_frontend)
+    if env_origins:
+        for o in env_origins:
+            o = (o or "").strip()
+            if not o:
+                continue
+            if o == "*":
+                return ["*"]
+            origins.append(o.rstrip("/"))
 
-    merged: list[str] = []
-    for origin in origins:
-        origin = (origin or "").strip().rstrip("/")
-        if origin and origin not in merged:
-            merged.append(origin)
-
+    # de-dup
+    merged: List[str] = []
+    for o in origins:
+        o = (o or "").strip().rstrip("/")
+        if o and o not in merged:
+            merged.append(o)
     return merged
-
 
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
-logger.info(f"FRONTEND_URL from settings: {getattr(settings, 'FRONTEND_URL', None)}")
-logger.info(f"CORS_ORIGINS from settings: {getattr(settings, 'CORS_ORIGINS', None)}")
-
-# AGGRESSIVE CORS: Allow all origins for debugging
-cors_origins = ["*"]
-logger.warning("🚨 AGGRESSIVE CORS: Allowing all origins (*) for debugging")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Explicitly allow all origins
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
-# -------------------------------------------------------------------
+# Help preflight requests return quickly
+@app.options("/{full_path:path}")
+async def preflight(full_path: str, request: Request):
+    return Response(status_code=204)
+
+# -----------------------------------------------------------------------------
 # Routers
-# -------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(sunsynk.router, prefix="/api/sunsynk", tags=["sunsynk"])
@@ -160,151 +167,84 @@ app.include_router(gemini_ai.router, tags=["Gemini AI"])
 app.include_router(ai_agent.router, prefix="/api/ai", tags=["AI Agent"])
 app.include_router(recent_activities_router, tags=["recent-activities"])
 
-# ✅ Email routes
+# ✅ Email routes (only if your app/api/email.py exists)
 app.include_router(email_router.router, prefix="/api/email", tags=["email"])
 
+# -----------------------------------------------------------------------------
+# Startup / Shutdown
+# -----------------------------------------------------------------------------
 scheduler = None
-
-
-def _dump_routes():
-    if not settings.DEBUG:
-        return
-
-    print("\n" + "=" * 60)
-    print("REGISTERED ROUTES")
-    print("=" * 60)
-
-    routes_by_prefix = {}
-    for route in app.routes:
-        path = getattr(route, "path", "")
-        methods = ",".join(sorted(getattr(route, "methods", []) or []))
-        name = getattr(route, "name", "")
-
-        prefix = "/".join(path.split("/")[:3]) if len(path.split("/")) > 2 else "Other"
-        routes_by_prefix.setdefault(prefix, []).append(f"{methods:15} {path:45} -> {name}")
-
-    for prefix in sorted(routes_by_prefix.keys()):
-        print(f"\n{prefix}:")
-        for route in sorted(routes_by_prefix[prefix]):
-            print(f"  {route}")
-
-    print("\n" + "=" * 60)
-    print("END ROUTES")
-    print("=" * 60 + "\n")
-
-
-async def _run_startup_diagnostics():
-    try:
-        if not settings.EGAUGE_BASE_URL:
-            return
-        logger.info("Running eGauge connection diagnostics...")
-        results = await diagnose_egauge_connection(settings.EGAUGE_BASE_URL)
-
-        working = [r for r in results if r.get("status") == 200]
-        errors = [r for r in results if r.get("error")]
-
-        logger.info(f"Diagnostic complete: {len(working)} working endpoints, {len(errors)} errors")
-
-        if not working:
-            logger.error("No working eGauge endpoints found! Check configuration.")
-    except Exception as e:
-        logger.error(f"Startup diagnostic failed: {e}")
-
 
 @app.on_event("startup")
 async def on_startup():
     global scheduler
-
     logger.info("Starting ESG Dashboard API...")
 
+    # ✅ CRITICAL: initialize _db so db.users works
+    try:
+        await connect_to_mongo()
+        logger.info("MongoDB connected")
+    except Exception as e:
+        logger.exception(f"MongoDB connection failed: {e}")
+        # Let app still start, but auth/login will fail until fixed
+
+    # optional scheduler
     try:
         scheduler = start_egauge_scheduler()
-        logger.info("eGauge poller scheduler started")
+        logger.info("eGauge scheduler started")
     except Exception as e:
         logger.warning(f"eGauge scheduler not started: {e}")
 
-    # ✅ Gemini status log (NO get_gemini_esg_service import anymore)
-    try:
-        logger.info(f"Gemini enabled: {gemini_service.enabled}")
-    except Exception as e:
-        logger.warning(f"Unable to determine Gemini status: {e}")
-
-    if settings.DEBUG:
-        await _run_startup_diagnostics()
-        _dump_routes()
-
-    logger.info(f"Application startup complete. Environment: {settings.ENVIRONMENT}")
-
+    logger.info(f"Startup complete. ENV={getattr(settings, 'ENVIRONMENT', 'unknown')}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     global scheduler
-    if scheduler:
-        scheduler.shutdown(wait=False)
-        logger.info("eGauge poller scheduler stopped")
-    logger.info("Application shutdown complete")
 
+    try:
+        if scheduler:
+            scheduler.shutdown(wait=False)
+            logger.info("Scheduler stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping scheduler: {e}")
 
+    # ✅ close mongo properly
+    try:
+        await close_mongo_connection()
+    except Exception as e:
+        logger.warning(f"Mongo close failed: {e}")
+
+    logger.info("Shutdown complete")
+
+# -----------------------------------------------------------------------------
+# Root / Health
+# -----------------------------------------------------------------------------
 @app.get("/")
 async def root():
     return {
         "message": "ESG Dashboard API is running",
         "version": "1.0.0",
-        "environment": settings.ENVIRONMENT,
-        "deployment_timestamp": "2025-02-03T02:20:00Z",  # Force deployment update
-        "cors_enabled": True,
-        "cors_origins": ["*"],  # Debug mode
-        "docs": "/docs" if settings.DEBUG else None,
-        "endpoints": {
-            "meters": "/api/meters",
-            "assets": "/api/assets",
-            "health": "/health",
-            "cors-test": "/cors-test",
-            "email": "/api/email",
-        },
+        "environment": getattr(settings, "ENVIRONMENT", "unknown"),
+        "docs": "/docs" if getattr(settings, "DEBUG", False) else None,
     }
-
 
 @app.get("/health")
 async def health_check():
-    from app.services.egauge_poller import STATUS
-    from app.core.database import _db
-
-    db_status = "connected" if _db is not None else "disconnected"
-    egauge_health = STATUS
+    db_status = "unknown"
+    try:
+        # your _DBProxy exposes _db methods via getattr once initialized
+        await db.command("ping")
+        db_status = "healthy"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+        logger.error(f"DB health check failed: {e}")
 
     return {
         "status": "healthy",
-        "version": "1.0.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "cors_origins": cors_origins,
-        "environment": settings.ENVIRONMENT,
-        "frontend_url": getattr(settings, 'FRONTEND_URL', None),
+        "environment": getattr(settings, "ENVIRONMENT", "unknown"),
         "services": {
             "database": db_status,
-            "egauge": egauge_health,
             "scheduler": "running" if scheduler else "stopped",
         },
     }
-
-
-@app.get("/cors-test")
-async def cors_test():
-    """Simple endpoint to test CORS headers"""
-    return {
-        "message": "CORS test successful",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "origin": "Request received successfully"
-    }
-
-
-@app.options("/cors-test")
-async def cors_test_options():
-    """Handle OPTIONS preflight for CORS test"""
-    return {"status": "ok"}
-
-
-@app.options("/api/auth/login")
-async def login_options():
-    """Handle OPTIONS preflight for login"""
-    return {"status": "ok"}

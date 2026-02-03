@@ -1,59 +1,61 @@
 # backend/app/core/database.py
 
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+import logging
+from motor.motor_asyncio import AsyncIOMotorClient
 from app.core.config import settings
 
-# Lazily create client + default database to avoid hard failure at import time
+logger = logging.getLogger(__name__)
+
 _client: AsyncIOMotorClient | None = None
-_db: AsyncIOMotorDatabase | None = None
+_db = None
 
+def _get_db_name_from_uri(uri: str) -> str:
+    # If you include /dbname in MONGODB_URL, use it.
+    # Otherwise fallback to settings.MONGODB_DB or "esg_dashboard".
+    try:
+        after_slash = uri.rsplit("/", 1)[-1]
+        if after_slash and "?" in after_slash:
+            after_slash = after_slash.split("?", 1)[0]
+        if after_slash and after_slash != uri and after_slash.strip():
+            return after_slash.strip()
+    except Exception:
+        pass
+    return getattr(settings, "MONGODB_DB", None) or "esg_dashboard"
 
-def _fallback_db_name() -> str:
-    # fallback if URI doesn’t include a db name
-    return "esg"
-
-
-def _init_client_if_needed() -> None:
-    """Initialize Motor client lazily. This avoids raising during import when
-    MONGODB_URL isn't set (useful for tests and CI where DB may be mocked).
-    """
+async def connect_to_mongo():
     global _client, _db
-    if _client is not None:
-        return
 
-    mongodb_url = getattr(settings, "MONGODB_URL", None)
-    if not mongodb_url:
-        # Leave _client/_db as None; code that needs the DB should handle this
-        return
+    if _client is not None and _db is not None:
+        return _db
 
-    client = AsyncIOMotorClient(mongodb_url.strip())
-
-    # If your MONGODB_URL includes a db name, get_default_database() will use it.
-    # Otherwise it may return None. We handle both cases.
-    default_db = client.get_default_database()
-    _client = client
-    _db = default_db if default_db is not None else client[_fallback_db_name()]
-
-
-# db may be None if MONGODB_URL is not set; callers should call get_db() or
-# check for None and raise informative errors at runtime instead of on import.
-db: AsyncIOMotorDatabase | None = None
-
-
-# ✅ REQUIRED BY OTHER ROUTERS (e.g. files.py)
-async def get_db() -> AsyncIOMotorDatabase:
-    """
-    FastAPI dependency for injecting the database.
-
-    Usage:
-        from fastapi import Depends
-        from app.core.database import get_db
-
-        @router.get("/something")
-        async def handler(db=Depends(get_db)):
-            ...
-    """
-    _init_client_if_needed()
-    if _db is None:
+    if not settings.MONGODB_URL:
         raise RuntimeError("MONGODB_URL is not set")
+
+    db_name = _get_db_name_from_uri(settings.MONGODB_URL)
+    logger.info(f"Connecting to MongoDB (db={db_name})")
+
+    _client = AsyncIOMotorClient(settings.MONGODB_URL)
+    _db = _client[db_name]
+
+    # quick ping
+    await _db.command("ping")
+    logger.info("MongoDB connection OK")
+
     return _db
+
+async def close_mongo_connection():
+    global _client, _db
+    if _client:
+        _client.close()
+    _client = None
+    _db = None
+    logger.info("MongoDB connection closed")
+
+class _DBProxy:
+    """Lets you keep using: from app.core.database import db; await db.users.find_one(...)"""
+    def __getattr__(self, item):
+        if _db is None:
+            raise RuntimeError("Database not initialized. Call connect_to_mongo() at startup.")
+        return getattr(_db, item)
+
+db = _DBProxy()
