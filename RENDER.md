@@ -15,9 +15,18 @@ Required environment variables (set in Render → Service → Environment):
 - MONGODB_URL  (MongoDB Atlas connection string)
 - SECRET_KEY
 - GEMINI_API_KEY (if using Gemini)
-- FRONTEND_URL (used for activation links)
-- EMAIL_HOST, EMAIL_PORT, EMAIL_USERNAME, EMAIL_PASSWORD (SMTP)
-- CORS_ORIGINS (comma-separated frontend origins)
+- FRONTEND_URL (used to build activation links and emails)
+- SMTP_HOST, SMTP_USER, SMTP_PASSWORD (or SMTP_PASS), FROM_EMAIL (email sending)
+- CORS_ORIGINS (comma-separated frontend origins) — include your frontend base URL (e.g. `https://esgfrontend-delta.vercel.app`)
+
+Tip: Use the helper script to validate Render settings from your CI environment:
+
+```bash
+# from repo root
+RENDER_API_KEY=<your-key> RENDER_SERVICE_ID=<service-id> python scripts/render/validate_render_settings.py
+```
+
+This will print warnings if `FRONTEND_URL` or `CORS_ORIGINS` are missing from the service.
 
 How to redeploy (quick):
 1) Go to your Render service dashboard for `backendadmin`.
