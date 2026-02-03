@@ -2,8 +2,8 @@
 
 import logging
 from typing import Optional, Any
-
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -13,8 +13,10 @@ _db: Optional[AsyncIOMotorDatabase] = None
 
 
 def _get_db_name_from_uri(uri: str) -> str:
-    # If you include /dbname in MONGODB_URL, use it.
-    # Otherwise fallback to settings.MONGODB_DB or "esg_dashboard".
+    """
+    If the URI includes /dbname, use it.
+    Otherwise fallback to settings.MONGO_DB_NAME or "esg_dashboard".
+    """
     try:
         after_slash = uri.rsplit("/", 1)[-1]
         if after_slash and "?" in after_slash:
@@ -23,7 +25,7 @@ def _get_db_name_from_uri(uri: str) -> str:
             return after_slash.strip()
     except Exception:
         pass
-    return getattr(settings, "MONGODB_DB", None) or "esg_dashboard"
+    return getattr(settings, "MONGO_DB_NAME", None) or "esg_dashboard"
 
 
 async def connect_to_mongo() -> AsyncIOMotorDatabase:
@@ -32,26 +34,15 @@ async def connect_to_mongo() -> AsyncIOMotorDatabase:
     if _client is not None and _db is not None:
         return _db
 
-    mongo_url = getattr(settings, "MONGODB_URL", None)
-    if not mongo_url:
-        # In development we allow the server to start without a real MongoDB
-        if getattr(settings, "DEBUG", False) or getattr(settings, "ENVIRONMENT", "") == "development":
-            logger.warning("MONGODB_URL is not set — starting without a real MongoDB in development mode. DB operations will raise if used.")
-            # Return the DB proxy which will raise clear runtime errors when used.
-            return db
-        # In non-dev environments treat this as fatal
-        raise RuntimeError("MONGODB_URL is not set")
-
+    mongo_url = settings.get_mongo_uri()  # ✅ supports MONGODB_URL / MONGO_URI / MONGODB_URI
     db_name = _get_db_name_from_uri(mongo_url)
-    logger.info(f"Connecting to MongoDB (db={db_name})")
 
+    logger.info(f"Connecting to MongoDB (db={db_name})")
     _client = AsyncIOMotorClient(mongo_url)
     _db = _client[db_name]
 
-    # quick ping
     await _db.command("ping")
     logger.info("MongoDB connection OK")
-
     return _db
 
 
@@ -64,14 +55,12 @@ async def close_mongo_connection() -> None:
     logger.info("MongoDB connection closed")
 
 
-# ✅ Compatibility dependency (prevents ImportError in routers that still do Depends(get_db))
-# You can keep it even if you don't use it anywhere.
 async def get_db() -> AsyncIOMotorDatabase:
     return await connect_to_mongo()
 
 
 class _DBProxy:
-    """Lets you keep using: from app.core.database import db; await db.users.find_one(...)"""
+    """Allows: from app.core.database import db; await db.users.find_one(...)"""
 
     def __getattr__(self, item: str) -> Any:
         if _db is None:

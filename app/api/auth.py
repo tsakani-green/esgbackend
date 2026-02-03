@@ -1,366 +1,324 @@
 # backend/app/api/auth.py
-# NOTE: Uses Mongo (motor) via app.core.database.db
-# Provides: /signup, /activate, /login, /me
-# Login accepts BOTH:
-#  - application/x-www-form-urlencoded (OAuth2 style)
-#  - application/json: { "username": "...", "password": "..." }
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
-from datetime import datetime, timedelta, timezone
-from jose import jwt, JWTError
-import os
-import logging
+from typing import Optional
+from bson import ObjectId
 
 from app.core.config import settings
-from app.core.database import db
+from app.core.database import get_db
 
-# ⛔️ Commented out for now (email sending disabled)
-# from app.services.email_service import send_activation_email
+import secrets
+import hashlib
+import asyncio
 
-try:
-    from bson import ObjectId
-except Exception:
-    ObjectId = None
-
-logger = logging.getLogger(__name__)
 router = APIRouter()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# -----------------------------------------------------------------------------
-# Email toggle (set DISABLE_EMAIL=true on Render to bypass email sending)
-# -----------------------------------------------------------------------------
-EMAIL_DISABLED = (os.getenv("DISABLE_EMAIL", "") or "").strip().lower() in ("1", "true", "yes", "on")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+JWT_ALGORITHM = "HS256"
 
-# -------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------
 
-def to_object_id(value: str):
-    if ObjectId is None:
-        raise RuntimeError("bson.ObjectId not available. Install pymongo/bson.")
-    return ObjectId(value)
+# ---------------- Models ----------------
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user_id: str
+    role: str
 
-def now_utc():
-    return datetime.now(timezone.utc)
 
-# Password hashing
-from passlib.context import CryptContext
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def hash_password(password: str) -> str:
-    return _pwd_context.hash(password)
-
-def verify_password(plain: str, hashed: str) -> bool:
-    if not hashed:
-        return False
-    return _pwd_context.verify(plain, hashed)
-
-# JWT config
-JWT_SECRET = settings.SECRET_KEY
-JWT_ALG = "HS256"
-ACCESS_EXPIRE_HOURS = int(getattr(settings, "ACCESS_TOKEN_EXPIRE_HOURS", 24) or 24)
-
-# Activation token config
-ACTIVATION_EXPIRE_HOURS = int(os.getenv("ACTIVATION_TOKEN_EXPIRE_HOURS", "24"))
-FRONTEND_URL = ((getattr(settings, "FRONTEND_URL", "") or os.getenv("FRONTEND_URL", "")) or "").rstrip("/")
-
-def make_activation_token(user_id: str, email: str) -> str:
-    exp = now_utc() + timedelta(hours=ACTIVATION_EXPIRE_HOURS)
-    payload = {
-        "type": "email_activation",
-        "sub": user_id,
-        "email": email,
-        "exp": exp,
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-def verify_activation_token(token: str) -> dict:
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        if payload.get("type") != "email_activation":
-            raise HTTPException(status_code=400, detail="Invalid token type")
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=400, detail="Invalid or expired activation token")
-
-def create_access_token(user_id: str, username: str, role: str = "user") -> str:
-    exp = now_utc() + timedelta(hours=ACCESS_EXPIRE_HOURS)
-    payload = {"sub": user_id, "username": username, "role": role, "exp": exp}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-def decode_access_token(token: str) -> dict:
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-# -------------------------------------------------------------------
-# Auth dependency used by other routers
-# -------------------------------------------------------------------
-async def get_current_user(request: Request) -> dict:
-    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-
-    token = auth.split(" ", 1)[1].strip()
-    payload = decode_access_token(token)
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
-
-    user = await db.users.find_one({"_id": to_object_id(user_id)})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-
-    return {
-        "id": str(user["_id"]),
-        "username": user.get("username"),
-        "email": user.get("email"),
-        "full_name": user.get("full_name"),
-        "role": user.get("role", "user"),
-        "is_active": user.get("is_active", False),
-        "company": user.get("company", ""),
-    }
-
-# -------------------------------------------------------------------
-# Schemas
-# -------------------------------------------------------------------
-
-class SignupIn(BaseModel):
+class User(BaseModel):
+    id: Optional[str] = None
     username: str
-    email: EmailStr
+    email: str
+    full_name: str
+    role: str
+    company: Optional[str] = None
+    disabled: bool = False
+    portfolio_access: Optional[list] = []
+    status: Optional[str] = "active"
+
+
+class UserInDB(User):
+    hashed_password: str
+    id: str
+    portfolio_access: Optional[list] = []
+
+
+class UserPublic(BaseModel):
+    id: Optional[str] = None
+    username: str
+    email: str
+    full_name: str
+    role: str
+    company: Optional[str] = None
+    disabled: bool = False
+    portfolio_access: Optional[list] = []
+    status: Optional[str] = "active"
+
+
+class UserCreate(BaseModel):
+    username: str
+    email: str
     password: str
     full_name: str
-    company: str | None = None
+    company: Optional[str] = None
+    portfolio_access: Optional[list] = []
+    status: Optional[str] = "active"
 
-class ActivateIn(BaseModel):
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordReset(BaseModel):
     token: str
+    new_password: str
 
-class LoginIn(BaseModel):
-    username: str
-    password: str
 
-# -------------------------------------------------------------------
-# Routes
-# -------------------------------------------------------------------
+# ---------------- Token helpers ----------------
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=JWT_ALGORITHM)
 
-@router.post("/signup")
-async def signup(payload: SignupIn):
-    username = payload.username.strip()
-    email = payload.email.strip().lower()
-    full_name = payload.full_name.strip()
-    company = (payload.company or "").strip()
 
-    existing = await db.users.find_one({"$or": [{"email": email}, {"username": username}]})
-    if existing:
-        raise HTTPException(status_code=400, detail="User already exists")
+def generate_reset_token() -> str:
+    return secrets.token_urlsafe(32)
 
-    # ✅ If email is disabled, auto-activate so you can login immediately
-    is_active = True if EMAIL_DISABLED else False
 
-    user_doc = {
-        "username": username,
-        "email": email,
-        "full_name": full_name,
-        "company": company,
-        "hashed_password": hash_password(payload.password),
-        "role": "user",
-        "is_active": is_active,
-        "created_at": now_utc(),
+async def send_password_reset_email(email: str, reset_token: str) -> bool:
+    try:
+        reset_link = f"{(settings.FRONTEND_URL or '').rstrip('/')}/reset-password?token={reset_token}"
+        print(f"Password reset link for {email}: {reset_link}")
+        return True
+    except Exception as e:
+        print(f"Error sending reset email: {str(e)}")
+        return False
+
+
+# ---------------- Auth helpers ----------------
+async def authenticate_user(db, username: str, password: str):
+    try:
+        try:
+            user = await asyncio.wait_for(
+                db.users.find_one({"$or": [{"username": username}, {"email": username}]}),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("database-timeout")
+
+        if user is None:
+            return False
+
+        stored = user.get("hashed_password", "") or ""
+        verified = False
+
+        try:
+            if stored.startswith("$2") or stored.startswith("$argon") or stored.startswith("$pbkdf2$"):
+                verified = pwd_context.verify(password, stored)
+            else:
+                from string import hexdigits
+                if len(stored) == 64 and all(c in hexdigits for c in stored.lower()):
+                    verified = hashlib.sha256(password.encode()).hexdigest() == stored
+                else:
+                    verified = password == stored
+        except Exception as e:
+            print(f"Password verification error for {username}: {e}")
+            verified = False
+
+        if not verified:
+            return False
+
+        user_dict = dict(user)
+        user_dict["id"] = str(user["_id"])
+        user_dict["portfolio_access"] = user_dict.get("portfolio_access", [])
+        user_dict["company"] = user_dict.get("company", None)
+        user_dict["disabled"] = user_dict.get("disabled", False)
+        user_dict["status"] = user_dict.get("status", "active")
+
+        return UserInDB(**user_dict)
+
+    except RuntimeError as re:
+        print(f"authenticate_user: database error: {re}")
+        raise
+    except Exception as e:
+        print(f"Authentication error: {str(e)}")
+        return False
+
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db=Depends(get_db)):
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        username: str = payload.get("sub")
+        role: str = payload.get("role")
+        if username is None or role is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = await db.users.find_one({"$or": [{"username": username}, {"email": username}]})
+    if user is None:
+        raise credentials_exception
+
+    user_dict = dict(user)
+    user_dict["id"] = str(user["_id"])
+    user_dict["portfolio_access"] = user_dict.get("portfolio_access", [])
+    user_dict["company"] = user_dict.get("company", None)
+    user_dict["disabled"] = user_dict.get("disabled", False)
+    user_dict["status"] = user_dict.get("status", "active")
+
+    return UserInDB(**user_dict)
+
+
+# ---------------- /me ----------------
+@router.get("/me", response_model=UserPublic)
+async def me(current_user: UserInDB = Depends(get_current_user)):
+    # ✅ never return hashed_password
+    return UserPublic(**current_user.model_dump(exclude={"hashed_password"}))
+
+
+# ---------------- Signup / Login ----------------
+@router.post("/signup", response_model=Token)
+async def signup(user_data: UserCreate, db=Depends(get_db)):
+    existing_user = await db.users.find_one(
+        {"$or": [{"username": user_data.username}, {"email": user_data.email}]}
+    )
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username or email already registered")
+
+    hashed_password = hashlib.sha256(user_data.password.encode()).hexdigest()
+
+    user_dict = {
+        "username": user_data.username,
+        "email": user_data.email,
+        "full_name": user_data.full_name,
+        "hashed_password": hashed_password,
+        "role": "client",
+        "company": user_data.company,
+        "portfolio_access": user_data.portfolio_access or [],
+        "disabled": False,
+        "status": "active",
+        "created_at": datetime.utcnow(),
+        "activated_at": datetime.utcnow(),
     }
 
-    if is_active:
-        user_doc["activated_at"] = now_utc()
+    result = await db.users.insert_one(user_dict)
+    user_id = str(result.inserted_id)
 
-    ins = await db.users.insert_one(user_doc)
-    user_id = str(ins.inserted_id)
+    access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+    access_token = create_access_token(
+        data={"sub": user_data.username, "role": "client"},
+        expires_delta=access_token_expires,
+    )
 
-    # If email disabled, return success immediately (no email, no token needed)
-    if EMAIL_DISABLED:
-        return {
-            "success": True,
-            "message": "Account created and auto-activated (email disabled). You can now log in.",
-        }
-
-    # Normal activation flow (email enabled)
-    token = make_activation_token(user_id=user_id, email=email)
-    activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
-
-    # ⛔️ Email sending disabled for now
-    # try:
-    #     send_activation_email(email, full_name, activation_link)
-    # except Exception as e:
-    #     logger.exception(f"Failed to send activation email to {email}: {e}")
-    #     raise HTTPException(status_code=503, detail="Failed to send activation email. Please try again later.")
-
-    # Since email is disabled but EMAIL_DISABLED flag wasn't set, still provide a usable message
-    logger.warning("Email sending is commented out, but DISABLE_EMAIL is not true. Returning activation link for manual use.")
     return {
-        "success": True,
-        "message": "Account created. Email sending is currently disabled; use the activation link manually.",
-        "activation_link": activation_link,
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": user_id,
+        "role": "client",
     }
 
-@router.post("/activate")
-async def activate(body: ActivateIn):
-    data = verify_activation_token(body.token)
-    user_id = data["sub"]
 
-    user = await db.users.find_one({"_id": to_object_id(user_id)})
+@router.post("/login", response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), db=Depends(get_db)):
+    try:
+        user = await asyncio.wait_for(
+            authenticate_user(db, form_data.username, form_data.password),
+            timeout=6.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Database timeout; try again later")
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Database unavailable; try again later")
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+    access_token = create_access_token(
+        data={"sub": user.username, "role": user.role},
+        expires_delta=access_token_expires,
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": str(user.id),
+        "role": user.role,
+    }
+
+
+# ---------------- Password reset ----------------
+@router.post("/forgot-password")
+async def forgot_password(request: PasswordResetRequest, db=Depends(get_db)):
+    user = await db.users.find_one({"email": request.email})
+    if not user:
+        return {"message": "If the email exists, a reset link has been sent"}
+
+    reset_token = generate_reset_token()
+    expires_at = datetime.utcnow() + timedelta(hours=1)
+
+    reset_token_data = {
+        "token": reset_token,
+        "user_id": str(user["_id"]),
+        "email": request.email,
+        "expires_at": expires_at,
+        "used": False,
+        "created_at": datetime.utcnow(),
+    }
+    await db.password_reset_tokens.insert_one(reset_token_data)
+
+    email_sent = await send_password_reset_email(request.email, reset_token)
+    if email_sent:
+        return {"message": "Password reset link sent (check server logs)"}
+
+    raise HTTPException(status_code=500, detail="Failed to send reset email")
+
+
+@router.post("/reset-password")
+async def reset_password(request: PasswordReset, db=Depends(get_db)):
+    reset_token_data = await db.password_reset_tokens.find_one(
+        {"token": request.token, "used": False, "expires_at": {"$gt": datetime.utcnow()}}
+    )
+    if not reset_token_data:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    user = await db.users.find_one({"_id": ObjectId(reset_token_data["user_id"])})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if user.get("is_active") is True:
-        return {
-            "success": True,
-            "message": "Account already activated.",
-            "user": {
-                "username": user.get("username"),
-                "email": user.get("email"),
-                "full_name": user.get("full_name"),
-            },
-        }
+    hashed_password = hashlib.sha256(request.new_password.encode()).hexdigest()
 
     await db.users.update_one(
-        {"_id": to_object_id(user_id)},
-        {"$set": {"is_active": True, "activated_at": now_utc()}},
+        {"_id": ObjectId(reset_token_data["user_id"])},
+        {"$set": {"hashed_password": hashed_password}},
+    )
+    await db.password_reset_tokens.update_one(
+        {"_id": reset_token_data["_id"]},
+        {"$set": {"used": True}},
     )
 
-    user = await db.users.find_one({"_id": to_object_id(user_id)})
-
-    return {
-        "success": True,
-        "message": "Account activated successfully. You can now log in.",
-        "user": {
-            "username": user.get("username"),
-            "email": user.get("email"),
-            "full_name": user.get("full_name"),
-        },
-    }
-
-@router.post("/login")
-async def login(request: Request):
-    """
-    Accepts BOTH:
-      - Form encoded: username=...&password=...
-      - JSON: { "username": "...", "password": "..." }
-    """
-    content_type = (request.headers.get("content-type") or "").lower()
-
-    username = None
-    password = None
-
-    # 1) Form (OAuth2 style)
-    if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
-        form = await request.form()
-        username = (form.get("username") or "").strip()
-        password = (form.get("password") or "")
-
-    # 2) JSON
-    elif "application/json" in content_type:
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        username = (body.get("username") or "").strip()
-        password = (body.get("password") or "")
-
-    # 3) Fallback attempt: try JSON if header was missing
-    else:
-        try:
-            body = await request.json()
-            username = (body.get("username") or "").strip()
-            password = (body.get("password") or "")
-        except Exception:
-            try:
-                form = await request.form()
-                username = (form.get("username") or "").strip()
-                password = (form.get("password") or "")
-            except Exception:
-                username = ""
-                password = ""
-
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="Missing username or password")
-
-    user = await db.users.find_one({"username": username})
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    if not user.get("is_active"):
-        raise HTTPException(status_code=403, detail="Please activate your account via the email link.")
-
-    if not verify_password(password, user.get("hashed_password", "")):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    token = create_access_token(
-        user_id=str(user["_id"]),
-        username=user.get("username", username),
-        role=user.get("role", "user"),
-    )
-
-    return {
-        "success": True,
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": str(user["_id"]),
-            "username": user.get("username"),
-            "email": user.get("email"),
-            "full_name": user.get("full_name"),
-            "role": user.get("role", "user"),
-        },
-    }
-
-@router.get("/me")
-async def me(current_user: dict = Depends(get_current_user)):
-    return current_user
-
-class ResendActivationRequest(BaseModel):
-    email: EmailStr
-
-@router.post("/resend-activation")
-async def resend_activation(payload: ResendActivationRequest):
-    """
-    Resend activation email for an existing user account.
-    """
-    email = payload.email.strip().lower()
-
-    user = await db.users.find_one({"email": email})
-    if not user:
-        return {"message": "If an account exists with this email, an activation link has been sent."}
-
-    if user.get("is_active", False):
-        return {"message": "This account is already activated. You can log in."}
-
-    # If email disabled, just auto-activate to unblock testing
-    if EMAIL_DISABLED:
-        await db.users.update_one(
-            {"_id": user["_id"]},
-            {"$set": {"is_active": True, "activated_at": now_utc()}},
-        )
-        return {"message": "Account auto-activated (email disabled). You can now log in."}
-
-    # Normal flow (email enabled)
-    user_id = str(user["_id"])
-    token = make_activation_token(user_id=user_id, email=email)
-    activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
-
-    # ⛔️ Email sending disabled for now
-    # try:
-    #     send_activation_email(email, user.get("full_name", ""), activation_link)
-    #     return {
-    #         "message": "Activation email sent. Please check your inbox.",
-    #         "activation_link": activation_link if settings.DEBUG else None
-    #     }
-    # except Exception as e:
-    #     logger.exception(f"Failed to resend activation email to {email}: {e}")
-    #     raise HTTPException(status_code=503, detail="Failed to send activation email. Please try again later.")
-
-    logger.warning("Resend activation requested but email sending is commented out; returning activation link.")
-    return {
-        "message": "Email sending is currently disabled; use the activation link manually.",
-        "activation_link": activation_link,
-    }
+    return {"message": "Password reset successful"}

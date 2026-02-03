@@ -10,11 +10,11 @@ from typing import List
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 
-# ✅ Option A DB (global db proxy) + lifecycle
+# ✅ DB lifecycle
 from app.core.database import db, connect_to_mongo, close_mongo_connection
 
 # API routers
@@ -35,8 +35,13 @@ from app.api.assets_sunsynk import router as assets_sunsynk_router
 from app.api.assets import router as projects_router
 from app.api.meters import router as meters_router
 
-# ✅ Email router (if you have it)
-from app.api import email as email_router
+# ✅ Email router (only if it exists)
+try:
+    from app.api import email as email_router
+    HAS_EMAIL = True
+except Exception:
+    email_router = None
+    HAS_EMAIL = False
 
 # Services (optional)
 from app.services.egauge_poller import start_egauge_scheduler
@@ -100,33 +105,39 @@ def _split_csv(value: str | None) -> List[str]:
 
 
 def _build_cors_origins() -> List[str]:
+    # ✅ Explicit allow-list
     origins = [
+        # Local dev
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+        # Vercel prod
         "https://esgfrontend-delta.vercel.app",
     ]
 
-    # FRONTEND_URL
+    # FRONTEND_URL (single origin)
     if getattr(settings, "FRONTEND_URL", None):
         origins.append(str(settings.FRONTEND_URL).strip().rstrip("/"))
 
-    # CORS_ORIGINS from settings (supports JSON list or CSV via your config.py)
+    # CORS_ORIGINS from settings (JSON list or CSV)
     try:
         env_origins = settings.get_cors_origins()
     except Exception as e:
         logger.warning(f"Failed to parse CORS_ORIGINS from settings: {e}")
         env_origins = _split_csv(os.getenv("CORS_ORIGINS"))
 
-    if env_origins:
-        for o in env_origins:
-            o = (o or "").strip()
-            if not o:
-                continue
-            if o == "*":
-                return ["*"]
-            origins.append(o.rstrip("/"))
+    for o in env_origins or []:
+        o = (o or "").strip().rstrip("/")
+        if not o:
+            continue
+        # ❌ do NOT allow "*" (we want explicit origins for predictability)
+        if o == "*":
+            logger.warning("CORS_ORIGINS contains '*'. Ignoring '*' and using explicit allow-list.")
+            continue
+        origins.append(o)
 
     # de-dup
     merged: List[str] = []
@@ -140,18 +151,15 @@ def _build_cors_origins() -> List[str]:
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
+# ✅ IMPORTANT:
+# You use Authorization: Bearer token (NOT cookies) -> keep allow_credentials=False
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"],  # includes Authorization
 )
-
-# Help preflight requests return quickly
-@app.options("/{full_path:path}")
-async def preflight(full_path: str, request: Request):
-    return Response(status_code=204)
 
 # -----------------------------------------------------------------------------
 # Routers
@@ -173,8 +181,8 @@ app.include_router(gemini_ai.router, tags=["Gemini AI"])
 app.include_router(ai_agent.router, prefix="/api/ai", tags=["AI Agent"])
 app.include_router(recent_activities_router, tags=["recent-activities"])
 
-# ✅ Email routes (only if your app/api/email.py exists)
-app.include_router(email_router.router, prefix="/api/email", tags=["email"])
+if HAS_EMAIL and email_router is not None:
+    app.include_router(email_router.router, prefix="/api/email", tags=["email"])
 
 # -----------------------------------------------------------------------------
 # Startup / Shutdown
@@ -186,13 +194,13 @@ async def on_startup():
     global scheduler
     logger.info("Starting ESG Dashboard API...")
 
-    # ✅ CRITICAL: initialize _db so db.users works
+    # ✅ Initialize MongoDB
     try:
         await connect_to_mongo()
         logger.info("MongoDB connected")
     except Exception as e:
         logger.exception(f"MongoDB connection failed: {e}")
-        # Let app still start, but auth/login will fail until fixed
+        # App can still start, but DB features/auth may fail until fixed.
 
     # optional scheduler
     try:
@@ -214,9 +222,9 @@ async def on_shutdown():
     except Exception as e:
         logger.warning(f"Error stopping scheduler: {e}")
 
-    # ✅ close mongo properly
     try:
         await close_mongo_connection()
+        logger.info("MongoDB closed")
     except Exception as e:
         logger.warning(f"Mongo close failed: {e}")
 
@@ -238,7 +246,6 @@ async def root():
 async def health_check():
     db_status = "unknown"
     try:
-        # your _DBProxy exposes _db methods via getattr once initialized
         await db.command("ping")
         db_status = "healthy"
     except Exception as e:
