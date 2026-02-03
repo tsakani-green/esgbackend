@@ -1,11 +1,14 @@
+# backend/app/api/admin.py
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Optional, Any, Dict
-from bson import ObjectId
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 
+from bson import ObjectId
+
 from app.api.auth import get_current_user
-from app.core.database import get_db
+from app.core.database import db  # ✅ Option A: use db proxy, NOT get_db
 
 router = APIRouter()
 
@@ -37,8 +40,9 @@ def _json_safe(doc: Any) -> Any:
     return doc
 
 
-def _require_admin(current_user):
-    if getattr(current_user, "role", None) != "admin":
+def _require_admin(current_user: dict):
+    # ✅ get_current_user returns dict (not object)
+    if not current_user or current_user.get("role") != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",
@@ -68,7 +72,6 @@ class AITemplateIn(BaseModel):
 @router.get("/clients")
 async def get_all_clients(
     current_user=Depends(get_current_user),
-    db=Depends(get_db),
     skip: int = 0,
     limit: int = 100,
 ):
@@ -86,14 +89,13 @@ async def get_all_clients(
         enriched_clients = []
 
         for client in clients:
-            # Keep ObjectId intact for DB queries
             client_oid = client.get("_id")
             if not client_oid:
-                continue  # skip malformed user doc
+                continue
 
             client_oid = _to_object_id(client_oid, field_name="client_id")
 
-            # Stats (use the ObjectId, not string)
+            # Stats
             file_count = await db.files.count_documents({"user_id": client_oid})
             report_count = await db.reports.count_documents({"user_id": client_oid})
 
@@ -108,8 +110,6 @@ async def get_all_clients(
 
                 # Assets for this portfolio
                 assets = await db.assets.find({"project_id": portfolio_oid}).to_list(100)
-
-                # Convert asset ids
                 assets = [_json_safe(a) for a in assets]
 
                 portfolio_clean = _json_safe(portfolio)
@@ -148,54 +148,69 @@ async def get_all_clients(
         )
 
 
-@router.post('/portfolios/{portfolio_id}/ai-templates')
-async def upsert_portfolio_template(portfolio_id: str, template: AITemplateIn, current_user=Depends(get_current_user), db=Depends(get_db)):
+@router.post("/portfolios/{portfolio_id}/ai-templates")
+async def upsert_portfolio_template(
+    portfolio_id: str,
+    template: AITemplateIn,
+    current_user=Depends(get_current_user),
+):
     """Create or update an AI prompt template for a portfolio (admin only)."""
     _require_admin(current_user)
     try:
-        # upsert by portfolio_id + key
         now = datetime.utcnow()
         doc = {
-            'portfolio_id': portfolio_id,
-            'key': template.key,
-            'name': template.name,
-            'prompt': template.prompt,
-            'is_public': bool(template.is_public),
-            'updated_at': now,
-            'created_by': getattr(current_user, 'username', None)
+            "portfolio_id": portfolio_id,
+            "key": template.key,
+            "name": template.name,
+            "prompt": template.prompt,
+            "is_public": bool(template.is_public),
+            "updated_at": now,
+            "created_by": current_user.get("username"),
         }
-        await db.ai_templates.update_one({'portfolio_id': portfolio_id, 'key': template.key}, {'$set': doc, '$setOnInsert': {'created_at': now}}, upsert=True)
+
+        await db.ai_templates.update_one(
+            {"portfolio_id": portfolio_id, "key": template.key},
+            {"$set": doc, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+
         # ensure index (best-effort)
         try:
-            await db.ai_templates.create_index([('portfolio_id', 1), ('key', 1)], unique=True)
+            await db.ai_templates.create_index([("portfolio_id", 1), ("key", 1)], unique=True)
         except Exception:
             pass
-        return {'ok': True, 'template': doc}
+
+        return {"ok": True, "template": doc}
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f'Unable to save template: {str(e)}')
+        raise HTTPException(status_code=500, detail=f"Unable to save template: {str(e)}")
 
 
-@router.delete('/portfolios/{portfolio_id}/ai-templates/{key}')
-async def delete_portfolio_template(portfolio_id: str, key: str, current_user=Depends(get_current_user), db=Depends(get_db)):
+@router.delete("/portfolios/{portfolio_id}/ai-templates/{key}")
+async def delete_portfolio_template(
+    portfolio_id: str,
+    key: str,
+    current_user=Depends(get_current_user),
+):
     """Delete an AI template by portfolio and key (admin only)."""
     _require_admin(current_user)
     try:
-        res = await db.ai_templates.delete_one({'portfolio_id': portfolio_id, 'key': key})
+        res = await db.ai_templates.delete_one({"portfolio_id": portfolio_id, "key": key})
         if res.deleted_count == 0:
-            raise HTTPException(status_code=404, detail='Template not found')
-        return {'ok': True, 'deleted': res.deleted_count}
+            raise HTTPException(status_code=404, detail="Template not found")
+        return {"ok": True, "deleted": res.deleted_count}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f'Unable to delete template: {str(e)}')
+        raise HTTPException(status_code=500, detail=f"Unable to delete template: {str(e)}")
+
 
 @router.get("/client/{client_id}")
 async def get_client_details(
     client_id: str,
     current_user=Depends(get_current_user),
-    db=Depends(get_db),
 ):
     _require_admin(current_user)
 
@@ -206,10 +221,7 @@ async def get_client_details(
         if not client:
             raise HTTPException(status_code=404, detail="Client not found")
 
-        # Get client files
         files = await db.files.find({"user_id": client_oid}).to_list(100)
-
-        # Get client reports
         reports = await db.reports.find({"user_id": client_oid}).to_list(100)
 
         return {
@@ -234,7 +246,6 @@ async def get_client_details(
 @router.get("/dashboard-stats")
 async def get_dashboard_stats(
     current_user=Depends(get_current_user),
-    db=Depends(get_db),
 ):
     _require_admin(current_user)
 
@@ -282,7 +293,6 @@ async def get_dashboard_stats(
 async def create_portfolio(
     portfolio_data: PortfolioCreate,
     current_user=Depends(get_current_user),
-    db=Depends(get_db),
 ):
     _require_admin(current_user)
 
@@ -297,7 +307,6 @@ async def create_portfolio(
 
         client_oid = _to_object_id(client.get("_id"), field_name="client_id")
 
-        # Check if portfolio name already exists for this client
         existing_portfolio = await db.projects.find_one(
             {"user_id": client_oid, "name": portfolio_data.name}
         )
@@ -311,7 +320,7 @@ async def create_portfolio(
             "name": portfolio_data.name,
             "description": portfolio_data.description,
             "status": portfolio_data.status,
-            "user_id": client_oid,  # store as ObjectId
+            "user_id": client_oid,  # ObjectId
             "client_id": portfolio_data.client_id,
             "type": "Portfolio",
             "created_at": datetime.utcnow(),
@@ -322,7 +331,7 @@ async def create_portfolio(
         }
 
         result = await db.projects.insert_one(portfolio)
-        portfolio["_id"] = result.inserted_id  # keep oid for now, json_safe later
+        portfolio["_id"] = result.inserted_id
 
         # Update client's portfolio_access if not already included
         portfolio_slug = portfolio_data.name.lower().replace(" ", "-")
@@ -351,7 +360,6 @@ async def create_portfolio(
 async def delete_client(
     username: str,
     current_user=Depends(get_current_user),
-    db=Depends(get_db),
 ):
     _require_admin(current_user)
 
@@ -401,7 +409,6 @@ async def update_client(
     username: str,
     update_data: Dict[str, Any],
     current_user=Depends(get_current_user),
-    db=Depends(get_db),
 ):
     _require_admin(current_user)
 

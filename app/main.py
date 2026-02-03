@@ -14,10 +14,10 @@ from fastapi.responses import JSONResponse, Response
 
 from app.core.config import settings
 
-# ✅ Use YOUR db module functions
+# ✅ Option A DB (global db proxy) + lifecycle
 from app.core.database import db, connect_to_mongo, close_mongo_connection
 
-# API routers (keep your existing imports)
+# API routers
 from app.api import (
     admin,
     ai_agent,
@@ -29,6 +29,7 @@ from app.api import (
     sunsynk,
     gemini_ai,
 )
+
 from app.api.recent_activities import router as recent_activities_router
 from app.api.assets_sunsynk import router as assets_sunsynk_router
 from app.api.assets import router as projects_router
@@ -97,6 +98,7 @@ def _split_csv(value: str | None) -> List[str]:
         return []
     return [v.strip().rstrip("/") for v in value.split(",") if v and v.strip()]
 
+
 def _build_cors_origins() -> List[str]:
     origins = [
         "http://localhost:5173",
@@ -114,7 +116,7 @@ def _build_cors_origins() -> List[str]:
     try:
         env_origins = settings.get_cors_origins()
     except Exception as e:
-        logger.warning(f"Failed to parse CORS_ORIGINS: {e}")
+        logger.warning(f"Failed to parse CORS_ORIGINS from settings: {e}")
         env_origins = _split_csv(os.getenv("CORS_ORIGINS"))
 
     if env_origins:
@@ -133,6 +135,7 @@ def _build_cors_origins() -> List[str]:
         if o and o not in merged:
             merged.append(o)
     return merged
+
 
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
@@ -157,7 +160,10 @@ app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(sunsynk.router, prefix="/api/sunsynk", tags=["sunsynk"])
 app.include_router(assets_sunsynk_router, prefix="/api/assets", tags=["assets-sunsynk"])
+
+# NOTE: invoices had no prefix in your code; keep it as-is
 app.include_router(invoices.router, tags=["invoices"])
+
 app.include_router(files.router, prefix="/api/files", tags=["files"])
 app.include_router(projects_router, prefix="/api/assets", tags=["assets"])
 app.include_router(meters_router, prefix="/api/meters", tags=["meters"])
