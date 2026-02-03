@@ -91,23 +91,30 @@ def _build_cors_origins() -> list[str]:
         "http://localhost:3008",
         "http://127.0.0.1:3008",
 
-        # Production frontend
+        # Production frontend (ALWAYS include)
         "https://esgfrontend-delta.vercel.app",
     ]
 
     # Optional: add FRONTEND_URL if set
     if getattr(settings, "FRONTEND_URL", None):
-        origins.append(settings.FRONTEND_URL.strip().rstrip("/"))
+        frontend_url = settings.FRONTEND_URL.strip().rstrip("/")
+        if frontend_url and frontend_url not in origins:
+            origins.append(frontend_url)
 
     # Optional: merge in CORS_ORIGINS if set
     try:
         extra = settings.get_cors_origins()
         for o in extra:
             o = (o or "").strip().rstrip("/")
-            if o:
+            if o and o not in origins:
                 origins.append(o)
     except Exception as e:
         logger.warning(f"Failed to parse CORS_ORIGINS: {e}")
+
+    # Always include the Vercel frontend as fallback
+    vercel_frontend = "https://esgfrontend-delta.vercel.app"
+    if vercel_frontend not in origins:
+        origins.append(vercel_frontend)
 
     merged: list[str] = []
     for origin in origins:

@@ -294,3 +294,41 @@ async def login(request: Request):
 @router.get("/me")
 async def me(current_user: dict = Depends(get_current_user)):
     return current_user
+
+
+class ResendActivationRequest(BaseModel):
+    email: EmailStr
+
+
+@router.post("/resend-activation")
+async def resend_activation(payload: ResendActivationRequest):
+    """
+    Resend activation email for an existing user account.
+    """
+    email = payload.email.strip().lower()
+    
+    # Find user by email
+    user = await db.users.find_one({"email": email})
+    if not user:
+        # Don't reveal if email exists for security
+        return {"message": "If an account exists with this email, an activation link has been sent."}
+    
+    # Check if already activated
+    if user.get("is_active", False):
+        return {"message": "This account is already activated. You can log in."}
+    
+    # Generate new activation token
+    user_id = str(user["_id"])
+    token = make_activation_token(user_id=user_id, email=email)
+    activation_link = f"{FRONTEND_URL}/activate?token={token}" if FRONTEND_URL else f"/activate?token={token}"
+    
+    try:
+        # Send activation email
+        send_activation_email(email, user.get("full_name", ""), activation_link)
+        return {
+            "message": "Activation email sent. Please check your inbox.",
+            "activation_link": activation_link if settings.DEBUG else None  # Show link in dev mode
+        }
+    except Exception as e:
+        logger.exception(f"Failed to resend activation email to {email}: {e}")
+        raise HTTPException(status_code=503, detail="Failed to send activation email. Please try again later.")
