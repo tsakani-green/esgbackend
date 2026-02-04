@@ -1,5 +1,3 @@
-# backend/app/main.py
-
 from __future__ import annotations
 
 import logging
@@ -10,7 +8,7 @@ from typing import List
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.core.config import settings
 
@@ -133,7 +131,7 @@ def _build_cors_origins() -> List[str]:
         o = (o or "").strip().rstrip("/")
         if not o:
             continue
-        # ❌ do NOT allow "*" (we want explicit origins for predictability)
+        # ❌ do NOT allow "*" (explicit origins only)
         if o == "*":
             logger.warning("CORS_ORIGINS contains '*'. Ignoring '*' and using explicit allow-list.")
             continue
@@ -152,7 +150,7 @@ cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
 # ✅ IMPORTANT:
-# You use Authorization: Bearer token (NOT cookies) -> keep allow_credentials=False
+# You use Authorization: Bearer token (NOT cookies) -> allow_credentials=False
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -160,6 +158,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],  # includes Authorization
 )
+
+# Optional: speed up preflight
+@app.options("/{full_path:path}")
+async def preflight(full_path: str, request: Request):
+    return Response(status_code=204)
 
 # -----------------------------------------------------------------------------
 # Routers
@@ -200,7 +203,6 @@ async def on_startup():
         logger.info("MongoDB connected")
     except Exception as e:
         logger.exception(f"MongoDB connection failed: {e}")
-        # App can still start, but DB features/auth may fail until fixed.
 
     # optional scheduler
     try:
@@ -210,6 +212,7 @@ async def on_startup():
         logger.warning(f"eGauge scheduler not started: {e}")
 
     logger.info(f"Startup complete. ENV={getattr(settings, 'ENVIRONMENT', 'unknown')}")
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
