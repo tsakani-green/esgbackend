@@ -1,3 +1,5 @@
+# backend/app/main.py
+
 from __future__ import annotations
 
 import logging
@@ -59,9 +61,9 @@ app = FastAPI(
     redoc_url="/redoc" if getattr(settings, "DEBUG", False) else None,
 )
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Error handlers
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     content_type = request.headers.get("content-type", "")
@@ -93,9 +95,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         },
     )
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # CORS
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 def _split_csv(value: str | None) -> List[str]:
     if not value:
         return []
@@ -103,7 +105,6 @@ def _split_csv(value: str | None) -> List[str]:
 
 
 def _build_cors_origins() -> List[str]:
-    # ✅ Explicit allow-list
     origins = [
         # Local dev
         "http://localhost:5173",
@@ -131,7 +132,6 @@ def _build_cors_origins() -> List[str]:
         o = (o or "").strip().rstrip("/")
         if not o:
             continue
-        # ❌ do NOT allow "*" (explicit origins only)
         if o == "*":
             logger.warning("CORS_ORIGINS contains '*'. Ignoring '*' and using explicit allow-list.")
             continue
@@ -149,14 +149,12 @@ def _build_cors_origins() -> List[str]:
 cors_origins = _build_cors_origins()
 logger.info(f"CORS origins configured: {cors_origins}")
 
-# ✅ IMPORTANT:
-# You use Authorization: Bearer token (NOT cookies) -> allow_credentials=False
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=False,
+    allow_credentials=False,     # Authorization Bearer token, not cookies
     allow_methods=["*"],
-    allow_headers=["*"],  # includes Authorization
+    allow_headers=["*"],         # includes Authorization
 )
 
 # Optional: speed up preflight
@@ -164,15 +162,15 @@ app.add_middleware(
 async def preflight(full_path: str, request: Request):
     return Response(status_code=204)
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Routers
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(sunsynk.router, prefix="/api/sunsynk", tags=["sunsynk"])
 app.include_router(assets_sunsynk_router, prefix="/api/assets", tags=["assets-sunsynk"])
 
-# NOTE: invoices had no prefix in your code; keep it as-is
+# invoices had no prefix; keep as-is
 app.include_router(invoices.router, tags=["invoices"])
 
 app.include_router(files.router, prefix="/api/files", tags=["files"])
@@ -180,16 +178,21 @@ app.include_router(projects_router, prefix="/api/assets", tags=["assets"])
 app.include_router(meters_router, prefix="/api/meters", tags=["meters"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
-app.include_router(gemini_ai.router, tags=["Gemini AI"])
+
+# ✅ IMPORTANT: gemini_ai.py already has prefix="/api/gemini" inside the router
+app.include_router(gemini_ai.router)
+
+# ai_agent is mounted at /api/ai
 app.include_router(ai_agent.router, prefix="/api/ai", tags=["AI Agent"])
+
 app.include_router(recent_activities_router, tags=["recent-activities"])
 
 if HAS_EMAIL and email_router is not None:
     app.include_router(email_router.router, prefix="/api/email", tags=["email"])
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Startup / Shutdown
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 scheduler = None
 
 @app.on_event("startup")
@@ -197,14 +200,12 @@ async def on_startup():
     global scheduler
     logger.info("Starting ESG Dashboard API...")
 
-    # ✅ Initialize MongoDB
     try:
         await connect_to_mongo()
         logger.info("MongoDB connected")
     except Exception as e:
         logger.exception(f"MongoDB connection failed: {e}")
 
-    # optional scheduler
     try:
         scheduler = start_egauge_scheduler()
         logger.info("eGauge scheduler started")
@@ -212,7 +213,6 @@ async def on_startup():
         logger.warning(f"eGauge scheduler not started: {e}")
 
     logger.info(f"Startup complete. ENV={getattr(settings, 'ENVIRONMENT', 'unknown')}")
-
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -233,9 +233,9 @@ async def on_shutdown():
 
     logger.info("Shutdown complete")
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Root / Health
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
     return {

@@ -26,4 +26,5 @@ apscheduler==3.10.4
 beautifulsoup4==4.12.3
 lxml==5.1.0
 
+# REQUIRED for eGauge + async HTTP calls
 httpx==0.26.0

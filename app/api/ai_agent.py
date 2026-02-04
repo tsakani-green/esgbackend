@@ -1,6 +1,7 @@
+# backend/app/api/ai_agent.py
+
 from fastapi import APIRouter, HTTPException
-from app.core.config import settings
-from app.services.gemini_client import genai, GEMINI_READY
+from app.services.gemini_client import GEMINI_READY, genai, get_gemini_model
 
 router = APIRouter()
 
@@ -10,9 +11,12 @@ async def ask_ai(payload: dict):
         raise HTTPException(status_code=503, detail="AI service unavailable (Gemini not configured)")
 
     prompt = (payload or {}).get("prompt") or ""
-    model_name = getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash")
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="Missing 'prompt'")
 
-    model = genai.GenerativeModel(model_name)
-    resp = model.generate_content(prompt)
-
-    return {"answer": getattr(resp, "text", "")}
+    try:
+        model = get_gemini_model()
+        resp = model.generate_content(prompt)
+        return {"answer": (getattr(resp, "text", "") or "").strip()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gemini request failed: {str(e)}")

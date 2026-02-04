@@ -124,6 +124,7 @@ async def authenticate_user(db, username: str, password: str):
                 verified = pwd_context.verify(password, stored)
             else:
                 from string import hexdigits
+
                 if len(stored) == 64 and all(c in hexdigits for c in stored.lower()):
                     verified = hashlib.sha256(password.encode()).hexdigest() == stored
                 else:
@@ -192,7 +193,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db=Depends(get_d
 # ---------------- /me ----------------
 @router.get("/me", response_model=UserPublic)
 async def me(current_user: UserInDB = Depends(get_current_user)):
-    # ✅ never return hashed_password
     return UserPublic(**current_user.model_dump(exclude={"hashed_password"}))
 
 
