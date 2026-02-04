@@ -1,26 +1,36 @@
-# backend/app/api/ai_agent.py
+from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from app.services.gemini import genai, GEMINI_READY
+from pydantic import BaseModel, Field
+
+from app.services.gemini_client import GEMINI_READY, get_gemini_model
 
 router = APIRouter()
 
-@router.post("/ask")
-async def ask_ai(payload: dict):
-    if not GEMINI_READY or genai is None:
-        raise HTTPException(
-            status_code=503,
-            detail="AI service unavailable (Gemini not configured)",
-        )
 
-    prompt = payload.get("prompt")
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt is required")
+class AskAIRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, description="User prompt to send to Gemini")
+    model: str | None = Field(default=None, description="Optional Gemini model override (e.g. gemini-1.5-flash)")
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content(prompt)
 
-    return {
-        "answer": response.text,
-        "model": "gemini-1.5-flash",
-    }
+class AskAIResponse(BaseModel):
+    answer: str
+
+
+@router.post("/ask", response_model=AskAIResponse)
+async def ask_ai(payload: AskAIRequest):
+    """
+    Client endpoint:
+      POST /api/ai/ask
+      { "prompt": "...", "model": "gemini-1.5-flash" }
+    """
+    if not GEMINI_READY:
+        raise HTTPException(status_code=503, detail="AI service unavailable (Gemini not configured)")
+
+    try:
+        model = get_gemini_model(payload.model)
+        resp = model.generate_content(payload.prompt)
+        text = getattr(resp, "text", None) or ""
+        return {"answer": text.strip()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gemini request failed: {str(e)}")
