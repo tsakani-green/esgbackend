@@ -1,13 +1,13 @@
 # backend/app/core/config.py
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
 from typing import Optional
 import json
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 ENV_PATH = BASE_DIR / ".env"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # -------------------------
     # Security / Auth
+    #וב
     # -------------------------
     SECRET_KEY: str = "change-me"
     ACCESS_TOKEN_EXPIRE_HOURS: int = 24
@@ -55,10 +56,18 @@ class Settings(BaseSettings):
         return uri
 
     # -------------------------
-    # Gemini AI  ✅ THIS FIXES THE CRASH
+    # Gemini AI
     # -------------------------
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-1.5-flash"
+
+    # -------------------------
+    # Sunsynk Integration ✅ FIX
+    # -------------------------
+    SUNSYNK_API_URL: Optional[str] = None
+    SUNSYNK_API_KEY: Optional[str] = None
+    SUNSYNK_API_SECRET: Optional[str] = None
+
 
 settings = Settings()
 
