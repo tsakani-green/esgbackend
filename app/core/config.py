@@ -20,7 +20,6 @@ class Settings(BaseSettings):
 
     # -------------------------
     # Security / Auth
-    #וב
     # -------------------------
     SECRET_KEY: str = "change-me"
     ACCESS_TOKEN_EXPIRE_HOURS: int = 24
@@ -62,7 +61,7 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-1.5-flash"
 
     # -------------------------
-    # Sunsynk Integration ✅ FIX
+    # Sunsynk Integration
     # -------------------------
     SUNSYNK_API_URL: Optional[str] = None
     SUNSYNK_API_KEY: Optional[str] = None
@@ -70,5 +69,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
 print(f"[config] ENV={settings.ENVIRONMENT} DEBUG={settings.DEBUG}")
