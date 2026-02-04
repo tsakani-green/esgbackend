@@ -14,7 +14,7 @@ email-validator==2.1.1
 
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-bcrypt==3.2.2
+bcrypt==4.0.1
 
 motor==3.3.2
 pymongo==4.6.1
@@ -26,5 +26,4 @@ apscheduler==3.10.4
 beautifulsoup4==4.12.3
 lxml==5.1.0
 
-# ✅ REQUIRED for eGauge + async HTTP calls
 httpx==0.26.0
