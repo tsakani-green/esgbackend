@@ -4,10 +4,13 @@ from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any
 import logging
 
-from ..services.sunsynk_service import sunsynk_service
+from ..services.sunsynk_service import SunsynkService  # ✅ Import the CLASS
 from ..api.auth import get_current_user
 
 logger = logging.getLogger(__name__)
+
+# ✅ Create an instance of SunsynkService
+sunsynk_service = SunsynkService()
 
 router = APIRouter()
 
@@ -21,6 +24,10 @@ async def get_bertha_house_data(current_user: Dict = Depends(get_current_user)) 
         # Check if user is authenticated
         if not current_user:
             raise HTTPException(status_code=401, detail="Authentication required")
+        
+        # ✅ Check if service is enabled before using it
+        if not sunsynk_service.enabled:
+            raise HTTPException(status_code=503, detail="Sunsynk service is not configured or disabled")
         
         # Get data from Sunsynk service
         data = await sunsynk_service.get_bertha_house_data()
@@ -49,6 +56,10 @@ async def get_bertha_house_realtime(current_user: Dict = Depends(get_current_use
         if not current_user:
             raise HTTPException(status_code=401, detail="Authentication required")
         
+        # ✅ Check if service is enabled
+        if not sunsynk_service.enabled:
+            raise HTTPException(status_code=503, detail="Sunsynk service is not configured or disabled")
+        
         data = await sunsynk_service.get_bertha_house_data()
         
         return {
@@ -74,6 +85,10 @@ async def get_devices(current_user: Dict = Depends(get_current_user)) -> Dict[st
     try:
         if not current_user:
             raise HTTPException(status_code=401, detail="Authentication required")
+        
+        # ✅ Check if service is enabled
+        if not sunsynk_service.enabled:
+            raise HTTPException(status_code=503, detail="Sunsynk service is not configured or disabled")
         
         devices = await sunsynk_service.get_device_list()
         

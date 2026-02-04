@@ -9,22 +9,35 @@ pymupdf==1.23.8
 pillow==10.1.0
 python-multipart==0.0.6
 
+# Async file operations
 aiofiles==23.2.1
+
+# Email validation
 email-validator==2.1.1
 
+# Authentication
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==3.2.2
 
+# MongoDB
 motor==3.3.2
 pymongo==4.6.1
 
+# AI/ML
 google-generativeai==0.3.2
 
+# Scheduler
 apscheduler==3.10.4
 
+# Web scraping
 beautifulsoup4==4.12.3
 lxml==5.1.0
 
-# REQUIRED for eGauge + async HTTP calls
+# HTTP clients (ADDED BOTH for flexibility)
 httpx==0.26.0
+aiohttp==3.9.1  # REQUIRED for SunsynkService async HTTP calls
+
+# Optional but recommended for async
+asyncio-throttle==1.0.2  # For rate limiting API calls
+aiocache==0.12.1  # For async caching
